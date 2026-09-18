@@ -1,0 +1,19 @@
+# 密钥/凭据 —— 绝对不能提交
+config.json
+config.json.bak*
+*.bak-*
+.env
+.secret*
+
+# 运行时产物
+node_modules/
+autorefresh.out
+ima_autorefresh.log
+keepalive.log
+*.log
+*.pid
+
+# 系统
+.DS_Store
+__pycache__/
+*.pyc

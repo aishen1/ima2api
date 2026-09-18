@@ -1,0 +1,47 @@
+{
+  "server": {
+    "port": 8081,
+    "host": "0.0.0.0"
+  },
+  "auth": {
+    "cookie": "PLATFORM=H5; CLIENT-TYPE=256021; WEB-VERSION=x.x.x; IMA-GUID=<你的GUID>; IMA-Q36=<你的Q36>; IMA-IUA=...; IMA-UID=<你的UID>; IMA-TOKEN=<在这里填 x-ima-cookie 里的 IMA-TOKEN>; IMA-REFRESH-TOKEN=<在这里填 IMA-REFRESH-TOKEN>; UID-TYPE=2; TOKEN-TYPE=14",
+    "refresh_token": "<在这里填 IMA-REFRESH-TOKEN>",
+    "registration_id": ""
+  },
+  "api_keys": [
+    "sk-ima-<自定一个密钥>"
+  ],
+  "default_model": "hy3-preview",
+  "models": {
+    "hy3-preview": {
+      "type": 0,
+      "id": "official_0",
+      "name": "Tencent Hy3 preview"
+    },
+    "hy3-preview-think": {
+      "type": 2,
+      "id": "official_2",
+      "name": "Tencent Hy3 preview (Think)"
+    },
+    "deepseek-v4-flash": {
+      "type": 3,
+      "id": "official_3",
+      "name": "DeepSeek V4-Flash"
+    },
+    "deepseek-v4-flash-think": {
+      "type": 1,
+      "id": "official_1",
+      "name": "DeepSeek V4-Flash (Think)"
+    },
+    "glm-5.2": {
+      "type": 3000,
+      "id": "official_3000",
+      "name": "GLM-5.2"
+    },
+    "glm-5.2-think": {
+      "type": 3001,
+      "id": "official_3001",
+      "name": "GLM-5.2 (Think)"
+    }
+  }
+}
