@@ -13,14 +13,9 @@ keepalive.log
 *.log
 *.pid
 
-# fpk 打包产物（体积大，由 fpk/build.sh 现场生成）
+# fpk 打包产物（体积大，由 fpk/build.sh 现场生成；源码与配置在仓库根与 fpk/ui、fpk/cmd 等）
 fpk/ima2api.fpk
-fpk/app/node_modules/
-fpk/app/runtime/
-fpk/app/server.js
-fpk/app/admin.html
-fpk/app/config.example.json
-fpk/app/package.json
+fpk/app/
 
 # 系统
 .DS_Store

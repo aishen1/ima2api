@@ -43,7 +43,12 @@ fi
 # ---- 同步源码到 app/ ----
 echo "[2/5] 同步源码"
 mkdir -p "$APP"
-cp "$ROOT/server.js" "$ROOT/admin.html" "$ROOT/config.example.json" "$ROOT/package.json" "$APP/"
+cp "$ROOT/server.js" "$ROOT/admin.html" "$ROOT/config.example.json" \
+   "$ROOT/package.json" "$ROOT/package-lock.json" "$APP/"
+# 桌面入口与图标（源在 fpk/ui/，纳入版本管理）
+mkdir -p "$APP/ui/images"
+cp "$ROOT/fpk/ui/config" "$APP/ui/"
+cp "$ROOT/fpk/ui/images/"*.png "$APP/ui/images/"
 # fpk 内配置端口走 8088（避免与常见的 8081 占用冲突）
 sed -i 's/"port": 8081/"port": 8088/' "$APP/config.example.json"
 
