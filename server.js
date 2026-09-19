@@ -6,53 +6,286 @@ const http = require("http");
 const crypto = require("crypto");
 
 // ============================================================
-// 1. 配置
+// 1. 配置（支持多账号账号池）
 // ============================================================
-const CONFIG = require("./config.json");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+
 const BASE_HOST = "ima.qq.com";
 const BASE_URL = "https://ima.qq.com";
-const COOKIE = CONFIG.auth.cookie;
-const API_KEYS = new Set(CONFIG.api_keys || []);
 
-const IMA_TOKEN = (() => {
-  const m = COOKIE.match(/IMA-TOKEN=([^;]+)/);
+// 配置目录：优先环境变量 IMA2API_CONFIG_DIR（fpk 里指向 TRIM_PKGVAR），
+// 否则退回脚本所在目录（兼容旧用法）。
+const CONFIG_DIR = process.env.IMA2API_CONFIG_DIR
+  ? path.resolve(process.env.IMA2API_CONFIG_DIR)
+  : __dirname;
+const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
+const CONFIG_EXAMPLE = path.join(__dirname, "config.example.json");
+const ADMIN_HTML = (() => {
+  try { return fs.readFileSync(path.join(__dirname, "admin.html"), "utf-8"); }
+  catch { return "<h1>admin.html 缺失</h1>"; }
+})();
+
+function defaultConfig() {
+  return {
+    server: { port: Number(process.env.IMA2API_PORT) || 8081, host: "0.0.0.0" },
+    api_keys: [genApiKey()],
+    default_model: "hy3-preview",
+    accounts: [],
+    models: defaultModels(),
+  };
+}
+
+function defaultModels() {
+  return {
+    "hy3-preview": { type: 0, id: "official_0", name: "Tencent Hy3 preview" },
+    "hy3-preview-think": { type: 2, id: "official_2", name: "Tencent Hy3 preview (Think)" },
+    "deepseek-v4-flash": { type: 3, id: "official_3", name: "DeepSeek V4-Flash" },
+    "deepseek-v4-flash-think": { type: 1, id: "official_1", name: "DeepSeek V4-Flash (Think)" },
+    "glm-5.2": { type: 3000, id: "official_3000", name: "GLM-5.2" },
+    "glm-5.2-think": { type: 3001, id: "official_3001", name: "GLM-5.2 (Think)" },
+  };
+}
+
+function genApiKey() {
+  return "sk-ima-" + crypto.randomBytes(20).toString("hex");
+}
+
+// ---- 配置读写（原子写） ----
+let CONFIG = loadConfig();
+
+function loadConfig() {
+  let raw;
+  try {
+    raw = fs.readFileSync(CONFIG_FILE, "utf-8");
+  } catch (e) {
+    // 首次启动：优先用 config.example.json 作模板，否则用默认值
+    let cfg;
+    try {
+      cfg = normalizeConfig(JSON.parse(fs.readFileSync(CONFIG_EXAMPLE, "utf-8")));
+    } catch (_) {
+      cfg = normalizeConfig(defaultConfig());
+    }
+    cfg.server = cfg.server || {};
+    // 端口优先级：环境变量（fpk 启动时注入） > 模板 > 8081
+    cfg.server.port = Number(process.env.IMA2API_PORT) || Number(cfg.server.port) || 8081;
+    excludeExampleKeys(cfg);
+    try { saveConfig(cfg); } catch (_) {}
+    return cfg;
+  }
+  try {
+    const cfg = normalizeConfig(JSON.parse(raw));
+    // 规范化可能产生了变更（补 Key 等）→ 立即落盘，
+    // 保证界面/客户端拿到的 Key 与磁盘文件一致。
+    try { saveConfig(cfg); } catch (_) {}
+    return cfg;
+  } catch (e) {
+    console.error(`配置文件 ${CONFIG_FILE} 解析失败，使用默认配置：${e.message}`);
+    const cfg = normalizeConfig(defaultConfig());
+    try { saveConfig(cfg); } catch (_) {}
+    return cfg;
+  }
+}
+
+// 示例模板里的 api_keys 为空（不能把别人的 Key 带到新安装里），删掉让 normalize 生成新的
+function excludeExampleKeys(cfg) {
+  if (Array.isArray(cfg.api_keys) && !cfg.api_keys.length) {
+    cfg.api_keys = [genApiKey()];
+  }
+}
+
+// 把旧版单账号 config（auth.cookie）迁移成 accounts 数组
+function normalizeConfig(cfg) {
+  cfg.server = cfg.server || {};
+  cfg.api_keys = Array.isArray(cfg.api_keys) ? cfg.api_keys : [];
+  if (!cfg.api_keys.length) cfg.api_keys.push(genApiKey());
+  cfg.models = cfg.models && Object.keys(cfg.models).length ? cfg.models : defaultModels();
+  cfg.default_model = cfg.default_model || "hy3-preview";
+  if (!Array.isArray(cfg.accounts)) cfg.accounts = [];
+
+  // 迁移旧版 auth.cookie / auth.refresh_token
+  if (cfg.auth && cfg.auth.cookie) {
+    cfg.accounts.push({
+      id: crypto.randomUUID(),
+      name: "默认账号",
+      cookie: cfg.auth.cookie,
+      refresh_token: cfg.auth.refresh_token || "",
+      enabled: true,
+      created_at: new Date().toISOString(),
+    });
+    delete cfg.auth;
+  }
+  for (const a of cfg.accounts) {
+    if (!a.id) a.id = crypto.randomUUID();
+    if (!a.name) a.name = "账号";
+    if (typeof a.enabled !== "boolean") a.enabled = true;
+    a.cookie = a.cookie || "";
+    a.refresh_token = a.refresh_token || "";
+  }
+  return cfg;
+}
+
+function saveConfig(cfg) {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  const tmp = CONFIG_FILE + ".tmp-" + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(cfg || CONFIG, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, CONFIG_FILE);
+}
+
+// ---- Cookie 工具 ----
+function cookieField(cookie, key) {
+  if (!cookie) return "";
+  const m = String(cookie).match(new RegExp("(?:^|;\\s*)" + key + "=([^;]+)"));
   return m ? m[1] : "";
-})();
+}
 
-const BKN = (() => {
+function calcBkn(token) {
   let h = 5381;
-  for (let i = 0; i < IMA_TOKEN.length; i++) h += (h << 5) + IMA_TOKEN.charCodeAt(i);
+  for (let i = 0; i < token.length; i++) h += (h << 5) + token.charCodeAt(i);
   return String(h & 0x7fffffff);
-})();
+}
 
 function maskKey(k) {
   if (!k || k.length < 12) return "***";
   return k.slice(0, 6) + "..." + k.slice(-4);
 }
 
-// ============================================================
-// 2. HTTP 客户端
-// ============================================================
-const IMA_HEADERS = {
-  "from_browser_ima": "1",
-  "x-ima-cookie": COOKIE,
-  "x-ima-bkn": BKN,
-  referer: BASE_URL,
-  origin: BASE_URL,
-  "User-Agent": "okhttp/4.12.0",
-  "Content-Type": "application/json; charset=utf-8",
-  "Accept-Encoding": "gzip",  // ⭐ 修复: 与真实 App 请求头一致
-};
+function maskCookie(c) {
+  if (!c) return "";
+  const tok = cookieField(c, "IMA-TOKEN");
+  const uid = cookieField(c, "IMA-UID");
+  return `IMA-UID=${uid || "?"} IMA-TOKEN=${tok ? tok.slice(0, 6) + "…" + tok.slice(-4) : "?"}`;
+}
 
-function imaPost(path, body, extraH = {}, timeout = 30000) {
+// ============================================================
+// 2. 账号池（多账号 + 轮换 + 故障切换）
+// ============================================================
+function activeAccounts() {
+  return (CONFIG.accounts || []).filter(a => a.enabled !== false && a.cookie);
+}
+
+function headersFor(account) {
+  const token = cookieField(account.cookie, "IMA-TOKEN");
+  return {
+    "from_browser_ima": "1",
+    "x-ima-cookie": account.cookie,
+    "x-ima-bkn": calcBkn(token),
+    referer: BASE_URL,
+    origin: BASE_URL,
+    "User-Agent": "okhttp/4.12.0",
+    "Content-Type": "application/json; charset=utf-8",
+    "Accept-Encoding": "gzip",
+  };
+}
+
+// 轮换游标
+let _rrCursor = 0;
+function pickAccounts() {
+  const list = activeAccounts();
+  if (!list.length) return [];
+  // 从游标处开始，返回一个轮换顺序的副本，用于逐个尝试（故障切换）
+  const n = list.length;
+  const start = _rrCursor % n;
+  _rrCursor = (_rrCursor + 1) % Math.max(n, 1);
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(list[(start + i) % n]);
+  return out;
+}
+
+// 账号统计（供管理页展示）
+// 账号有效性判定。取值：
+//   disabled  已停用      —— 用户手动停用，不参与轮换
+//   nocookie  缺凭据      —— 没有 cookie，不可用
+//   invalid   已失效      —— 上游明确回鉴权失败（登录过期/账号被踢）
+//   error     异常        —— 网络/超时/上游其他错误，不代表凭据坏了
+//   ok        有效        —— 最近一次真实调用成功
+//   unknown   未验证      —— 刚添加还没跑过任何请求
+function accountState(a) {
+  if (a.enabled === false) return "disabled";
+  if (!a.cookie) return "nocookie";
+  if (a.last_error) return a.last_error_kind === "auth" ? "invalid" : "error";
+  if (a.last_ok) return "ok";
+  return "unknown";
+}
+
+// token 剩余有效期：由「最近成功续期时间 + 接口返回的有效秒数」推算。
+// 没有续期记录时返回 null（此时凭据可能仍有效，只是无法推算，如实显示"未验证"）。
+function accountExpiry(a) {
+  const valid = Number(a.token_valid_time) || 0;
+  if (!a.last_refresh || !valid) return null;
+  const expireAt = new Date(a.last_refresh).getTime() + valid * 1000;
+  return {
+    expire_at: new Date(expireAt).toISOString(),
+    remain_seconds: Math.round((expireAt - Date.now()) / 1000),
+  };
+}
+
+function accountStats() {
+  return (CONFIG.accounts || []).map(a => {
+    const exp = accountExpiry(a);
+    return {
+      id: a.id,
+      name: a.name,
+      enabled: a.enabled !== false,
+      state: accountState(a),
+      has_cookie: !!a.cookie,
+      has_refresh_token: !!a.refresh_token,
+      cookie_masked: maskCookie(a.cookie),
+      last_ok: a.last_ok || null,
+      last_check: a.last_check || null,
+      last_error: a.last_error || null,
+      last_error_kind: a.last_error_kind || null,
+      last_refresh: a.last_refresh || null,
+      token_valid_time: Number(a.token_valid_time) || null,
+      expire_at: exp ? exp.expire_at : null,
+      remain_seconds: exp ? exp.remain_seconds : null,
+      ok_count: a.ok_count || 0,
+      fail_count: a.fail_count || 0,
+    };
+  });
+}
+
+// 记录一次真实探测结果（供"一键检测"用，与业务调用的统计分开标注）
+function markChecked(account, ok, errOrMsg) {
+  if (!account) return;
+  const live = (CONFIG.accounts || []).find(x => x.id === account.id);
+  if (!live) return;
+  live.last_check = new Date().toISOString();
+  touchAccount(account, ok, errOrMsg);
+  saveConfig();
+}
+
+// 记录失败：ok=false 时 errOrMsg 可以是 Error（能取到 imaCode）或字符串
+function touchAccount(account, ok, errOrMsg) {
+  if (!account) return;
+  const live = (CONFIG.accounts || []).find(x => x.id === account.id);
+  if (!live) return;
+  if (ok) {
+    live.ok_count = (live.ok_count || 0) + 1;
+    live.last_ok = new Date().toISOString();
+    live.last_error = null;
+    live.last_error_kind = null;
+  } else {
+    const msg = (errOrMsg && errOrMsg.message) || String(errOrMsg || "unknown");
+    live.fail_count = (live.fail_count || 0) + 1;
+    live.last_error = msg.slice(0, 300);
+    // 区分"凭据失效"与"网络/上游抖动"——前者要重新登录，后者重试即可
+    live.last_error_kind = isAuthError(errOrMsg) ? "auth" : "other";
+  }
+}
+
+// ============================================================
+// 2b. HTTP 客户端（每个请求绑定账号）
+// ============================================================
+function imaPost(path, body, account, extraH = {}, timeout = 30000) {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
     const req = https.request({
       hostname: BASE_HOST, port: 443, path, method: "POST",
-      headers: { ...IMA_HEADERS, ...extraH, "Content-Length": Buffer.byteLength(payload) },
+      headers: { ...headersFor(account), ...extraH, "Content-Length": Buffer.byteLength(payload) },
       timeout,
     }, (res) => {
-      // ⭐ 修复: 处理 gzip 压缩响应（与 Accept-Encoding: gzip 配套）
       const zlib = require("zlib");
       const encoding = res.headers["content-encoding"] || "";
       let stream = res;
@@ -73,12 +306,12 @@ function imaPost(path, body, extraH = {}, timeout = 30000) {
   });
 }
 
-function imaSse(path, body) {
+function imaSse(path, body, account) {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
     const req = https.request({
       hostname: BASE_HOST, port: 443, path, method: "POST",
-      headers: { ...IMA_HEADERS, Accept: "text/event-stream", "Content-Length": Buffer.byteLength(payload) },
+      headers: { ...headersFor(account), Accept: "text/event-stream", "Content-Length": Buffer.byteLength(payload) },
       timeout: 180000,
     }, (res) => {
       if (res.statusCode !== 200) {
@@ -149,17 +382,19 @@ function eventText(evt) {
 // ============================================================
 // 3. IMA API
 // ============================================================
-async function imaInitSession(question) {
+async function imaInitSession(question, account) {
   const { data } = await imaPost("/cgi-bin/session_logic/init_session", {
     env_info: { interact_type: 2, robot_type: 10000 },
     name: (question || "新对话").slice(0, 50),
     msgs_limit: 20,  // IMA 上限为 20（超过会报 code=51）
-  });
+  }, account);
   if (data.code === 0) return data.session_id;
-  throw new Error(`InitSession failed: code=${data.code} msg=${data.msg}`);
+  const err = new Error(`InitSession failed: code=${data.code} msg=${data.msg}`);
+  err.imaCode = data.code;
+  throw err;
 }
 
-function imaQaStream(sessionId, question, modelType, modelId) {
+function imaQaStream(sessionId, question, modelType, modelId, account) {
   return imaSse("/cgi-bin/assistant/qa", {
     session_id: sessionId,
     robot_type: 10000,
@@ -168,7 +403,7 @@ function imaQaStream(sessionId, question, modelType, modelId) {
     command_info: { question_info: {} },
     client_id: crypto.randomUUID(),
     model_info: { model_type: modelType, model_id: modelId },
-  });
+  }, account);
 }
 
 async function collectResponseText(events) {
@@ -184,59 +419,91 @@ async function collectResponseText(events) {
 }
 
 // ============================================================
-// 4. 会话缓存
+// 4. 会话缓存（按 账号+会话 绑定，避免多账号串台）
 // ============================================================
 const sessions = new Map();
 const SESSION_TTL = 30 * 60 * 1000;
+const sessionKey = (convId, account) => `${account ? account.id : "_"}::${convId || "_"}`;
 
-function getCachedSession(convId) {
+function getCachedSession(convId, account) {
   const now = Date.now();
   for (const [k, v] of sessions) { if (now - v.ts > SESSION_TTL) sessions.delete(k); }
-  if (convId && sessions.has(convId)) { sessions.get(convId).ts = now; return sessions.get(convId).id; }
+  const key = sessionKey(convId, account);
+  if (sessions.has(key)) { sessions.get(key).ts = now; return sessions.get(key).id; }
   return null;
 }
 
-async function ensureSession(convId, question, forceNew = false) {
+async function ensureSession(convId, question, account, forceNew = false) {
   if (!forceNew) {
-    const c = getCachedSession(convId);
+    const c = getCachedSession(convId, account);
     if (c) return c;
   }
-  const id = await imaInitSession(question);
-  if (convId) sessions.set(convId, { id, ts: Date.now() });
+  const id = await imaInitSession(question, account);
+  if (convId) sessions.set(sessionKey(convId, account), { id, ts: Date.now() });
   return id;
 }
 
-// ⭐ 修复: IMA 会话达到 msgs_limit 后自动重建，避免"突然结束"
+// 判断错误是否属于"该换账号了"（登录过期 / 凭据失效）
+function isAuthError(err) {
+  const msg = (err && err.message) || "";
+  const code = err && err.imaCode;
+  // 41/600001: 登录失败/登录过期；5/51: 会话无效
+  if (code === 41 || code === 600001 || code === 5 || code === 51) return true;
+  return /登录过期|重新登录|登录失败|Session init failed|unauthor|invalid.*token|401|403/i.test(msg);
+}
+
+// ⭐ 多账号：逐个账号尝试；当前账号鉴权失败则自动切下一个。
+//    IMA 会话达到 msgs_limit 后自动重建，避免"突然结束"。
 async function imaQaStreamWithRetry(convId, question, modelType, modelId) {
-  let sessionId = await ensureSession(convId, question);
-  const events = await imaQaStream(sessionId, question, modelType, modelId);
-  // 收集并检测是否触发会话限制错误（INNER_EXCEPTION 含 session limit）
-  return (async function*() {
-    let hitLimit = false;
-    for await (const evt of events) {
-      if (evt.event === "INNER_EXCEPTION" || evt.event === "ERROR" || evt.event === "FAILED") {
-        // IMA 会话满了通常返回 INNER_EXCEPTION，此时重建 session 重试一次
-        try {
-          const newId = await ensureSession(convId, question, true);
-          const retryEvents = await imaQaStream(newId, question, modelType, modelId);
-          for await (const e2 of retryEvents) yield e2;
-        } catch (_) {
-          yield evt; // 重试也失败，把原始事件透传出去
+  const candidates = pickAccounts();
+  if (!candidates.length) {
+    throw new Error("没有可用账号：请在配置页添加至少一个 Cookie 账号");
+  }
+  let lastErr = null;
+  for (let i = 0; i < candidates.length; i++) {
+    const account = candidates[i];
+    try {
+      let sessionId = await ensureSession(convId, question, account);
+      const events = await imaQaStream(sessionId, question, modelType, modelId, account);
+      touchAccount(account, true);
+      // 包装成生成器，出错时若属鉴权错误则切换下一账号
+      return await (async function*() {
+        for await (const evt of events) {
+          if (evt.event === "INNER_EXCEPTION" || evt.event === "ERROR" || evt.event === "FAILED") {
+            // IMA 会话满了通常返回 INNER_EXCEPTION，此时重建 session 重试一次
+            try {
+              const newId = await ensureSession(convId, question, account, true);
+              const retryEvents = await imaQaStream(newId, question, modelType, modelId, account);
+              for await (const e2 of retryEvents) yield e2;
+            } catch (_) {
+              yield evt; // 重试也失败，把原始事件透传出去
+            }
+            return;
+          }
+          yield evt;
         }
-        return;
-      }
-      yield evt;
+      })();
+    } catch (e) {
+      lastErr = e;
+      const canFailover = isAuthError(e) || /timeout|ECONN|socket hang up/i.test(e.message || "");
+      touchAccount(account, false, e);
+      console.error(`[ACCOUNT-FAIL] ${account.name}: ${e.message}${canFailover ? " → 尝试下一账号" : ""}`);
+      if (!canFailover) throw e;
+      // 继续循环尝试下一个账号
     }
-  })();
+  }
+  throw lastErr || new Error("所有账号均不可用");
 }
 
 // ============================================================
-// 5. 模型
+// 5. 模型（配置可热更新，故用 getter）
 // ============================================================
-const MODELS = CONFIG.models;
-const DEFAULT_MODEL = CONFIG.default_model;
+function getModels() { return CONFIG.models || {}; }
+function getDefaultModel() { return CONFIG.default_model || Object.keys(getModels())[0]; }
 
 function resolveModel(requested) {
+  const MODELS = getModels();
+  const DEFAULT_MODEL = getDefaultModel();
   if (!requested) return MODELS[DEFAULT_MODEL];
   if (MODELS[requested]) return MODELS[requested];
   const lower = requested.toLowerCase();
@@ -250,9 +517,10 @@ function resolveModel(requested) {
 // 6. 认证 & 工具
 // ============================================================
 function checkAuth(req) {
+  const keys = new Set(CONFIG.api_keys || []);
   const bearer = (req.headers["authorization"] || "").replace(/^Bearer\s+/i, "");
-  if (bearer && API_KEYS.has(bearer)) return true;
-  return API_KEYS.has(req.headers["x-api-key"] || "");
+  if (bearer && keys.has(bearer)) return true;
+  return keys.has(req.headers["x-api-key"] || "");
 }
 
 function cors(res) {
@@ -622,7 +890,7 @@ function parseFunctionCalls(text) {
 // 8. OpenAI /v1/chat/completions
 // ============================================================
 async function openaiChat(req, res, body) {
-  const modelKey = body.model || DEFAULT_MODEL;
+  const modelKey = body.model || getDefaultModel();
   const model = resolveModel(modelKey);
   const stream = !!body.stream;
   const messages = body.messages || [];
@@ -823,11 +1091,9 @@ async function openaiChat(req, res, body) {
       : extractContent(messages[0]).slice(0, 200);
     oaiConvId = "conv-" + crypto.createHash("md5").update(anchor).digest("hex").slice(0, 12);
   }
-  let sessionId;
-  try {
-    sessionId = await ensureSession(oaiConvId, question.slice(0, 100));
-  } catch (e) {
-    return json(res, 502, { error: { message: "Session init failed: " + e.message, type: "api_error" } });
+  // 前置检查：内部多账号流已自管 session，这里仅用于提前暴露"无账号"错误
+  if (!activeAccounts().length) {
+    return json(res, 503, { error: { message: "没有可用账号：请在配置页添加至少一个 Cookie 账号", type: "api_error" } });
   }
 
   // --- 非流式 ---
@@ -976,7 +1242,7 @@ async function openaiChat(req, res, body) {
 // 9. Anthropic /v1/messages
 // ============================================================
 async function anthropicMessages(req, res, body) {
-  const modelKey = body.model || DEFAULT_MODEL;
+  const modelKey = body.model || getDefaultModel();
   const model = resolveModel(modelKey);
   const stream = !!body.stream;
   const messages = body.messages || [];
@@ -1210,13 +1476,10 @@ async function anthropicMessages(req, res, body) {
       : extractContent(messages[0]).slice(0, 200);      // fallback: 第一条消息
     effectiveConvId = "conv-" + crypto.createHash("md5").update(anchor).digest("hex").slice(0, 12);
   }
-  let sessionId;
-  const isNewSession = !getCachedSession(effectiveConvId);
-  try { sessionId = await ensureSession(effectiveConvId, question.slice(0, 100)); }
-  catch (e) {
-    console.error(`[ANTHROPIC-SESSION] init failed: ${e.message}`);
-    return json(res, 502, { type: "error", error: { type: "api_error", message: "Session init failed: " + e.message } });
+  if (!activeAccounts().length) {
+    return json(res, 503, { type: "error", error: { type: "api_error", message: "没有可用账号：请在配置页添加至少一个 Cookie 账号" } });
   }
+  const isNewSession = !getCachedSession(effectiveConvId, null);
 
   // --- 非流式 ---
   if (!stream) {
@@ -1363,14 +1626,28 @@ async function router(req, res) {
   const urlPath = url.split("?")[0];
 
   if (urlPath === "/health") return json(res, 200, { status: "ok" });
-  if (urlPath === "/") return json(res, 200, {
+
+  // ---- 本地管理 API（仅允许来自本机/内网访问，公网来源拒绝） ----
+  if (urlPath === "/admin" || urlPath.startsWith("/admin/")) {
+    if (!isLocalRequest(req)) {
+      return json(res, 403, { error: "管理接口仅允许内网访问" });
+    }
+    return await adminApi(req, res, urlPath);
+  }
+
+  if (urlPath === "/" || urlPath === "/index.html") {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    return res.end(ADMIN_HTML);
+  }
+
+  if (urlPath === "/info") return json(res, 200, {
     service: "ima2api",
     version: "3.0.0",
     endpoints: {
       openai: ["POST /v1/chat/completions (tools / function calling)", "GET /v1/models"],
       anthropic: ["POST /v1/messages (tools / tool_use)"],
     },
-    models: Object.keys(MODELS),
+    models: Object.keys(getModels()),
     auth: "Bearer <api_key> or x-api-key header",
   });
 
@@ -1396,7 +1673,7 @@ async function router(req, res) {
   }
 
   if (req.method === "GET" && urlPath === "/v1/models") {
-    const modelList = Object.entries(MODELS).map(([id, info]) => ({
+    const modelList = Object.entries(getModels()).map(([id, info]) => ({
       id, object: "model", created: 1700000000, owned_by: "ima",
       type: "model", display_name: info.name,
       created_at: "2024-01-01T00:00:00Z",
@@ -1445,13 +1722,299 @@ async function router(req, res) {
 }
 
 // ============================================================
-// 11. 启动
+// 11. 管理 API（本机/内网）
 // ============================================================
-const PORT = CONFIG.server?.port || 8080;
+function isLocalRequest(req) {
+  const ip = (req.socket && (req.socket.remoteAddress || "")) || "";
+  const xff = (req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  const clientIp = xff || ip;
+  // loopback / 私有网段 / link-local
+  return /^(::1|::ffff:127\.|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|fe80:|fc|fd)/i.test(clientIp)
+    || clientIp === "" || clientIp === "::ffff:127.0.0.1";
+}
+
+function readBody(req) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    req.on("data", c => chunks.push(c));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf-8");
+      try { resolve(raw ? JSON.parse(raw) : {}); } catch { resolve({}); }
+    });
+    req.on("error", () => resolve({}));
+  });
+}
+
+function serverBase(req) {
+  const host = (req.headers.host || "").split(":")[0] || "127.0.0.1";
+  return `http://${host}:${CONFIG.server?.port || 8081}`;
+}
+
+async function adminApi(req, res, urlPath) {
+  // GET /admin/state — 服务状态 + 账号列表（cookie 打码）+ 调用信息
+  if (req.method === "GET" && urlPath === "/admin/state") {
+    return json(res, 200, {
+      ok: true,
+      accounts: accountStats(),
+      active_accounts: activeAccounts().length,
+      api_keys: (CONFIG.api_keys || []).map(k => ({ masked: maskKey(k), value: k })),
+      models: getModels(),
+      default_model: getDefaultModel(),
+      port: CONFIG.server?.port || 8081,
+      base_url: serverBase(req),
+      openai_base: serverBase(req) + "/v1",
+      anthropic_base: serverBase(req) + "/v1",
+      config_file: CONFIG_FILE,
+    });
+  }
+
+  const body = req.method === "POST" ? await readBody(req) : {};
+
+  // POST /admin/account/add — 新增账号
+  if (req.method === "POST" && urlPath === "/admin/account/add") {
+    const cookie = (body.cookie || "").trim();
+    if (!cookie) return json(res, 400, { ok: false, error: "Cookie 不能为空" });
+    if (!/IMA-TOKEN=/.test(cookie)) {
+      return json(res, 400, { ok: false, error: "Cookie 里没有找到 IMA-TOKEN，请确认复制的是完整 x-ima-cookie" });
+    }
+    // refresh_token：优先用显式传入，否则尝试从 cookie 的 IMA-REFRESH-TOKEN 提取
+    let refresh = (body.refresh_token || "").trim();
+    if (!refresh) refresh = cookieField(cookie, "IMA-REFRESH-TOKEN");
+    const account = {
+      id: crypto.randomUUID(),
+      name: (body.name || "").trim() || `账号 ${ (CONFIG.accounts || []).length + 1 }`,
+      cookie,
+      refresh_token: refresh,
+      enabled: true,
+      created_at: new Date().toISOString(),
+    };
+    CONFIG.accounts = CONFIG.accounts || [];
+    CONFIG.accounts.push(account);
+    saveConfig();
+    return json(res, 200, { ok: true, id: account.id, name: account.name });
+  }
+
+  // POST /admin/account/update — 改名 / 启停 / 更新 cookie
+  if (req.method === "POST" && urlPath === "/admin/account/update") {
+    const a = (CONFIG.accounts || []).find(x => x.id === body.id);
+    if (!a) return json(res, 404, { ok: false, error: "账号不存在" });
+    if (typeof body.name === "string") a.name = body.name.trim() || a.name;
+    if (typeof body.enabled === "boolean") a.enabled = body.enabled;
+    if (typeof body.cookie === "string" && body.cookie.trim()) {
+      if (!/IMA-TOKEN=/.test(body.cookie)) return json(res, 400, { ok: false, error: "Cookie 无效" });
+      a.cookie = body.cookie.trim();
+      a.refresh_token = body.refresh_token ? body.refresh_token.trim() : cookieField(a.cookie, "IMA-REFRESH-TOKEN");
+      a.last_error = null;
+    }
+    saveConfig();
+    return json(res, 200, { ok: true });
+  }
+
+  // POST /admin/account/delete — 删除账号
+  if (req.method === "POST" && urlPath === "/admin/account/delete") {
+    const before = (CONFIG.accounts || []).length;
+    CONFIG.accounts = (CONFIG.accounts || []).filter(x => x.id !== body.id);
+    if (CONFIG.accounts.length === before) return json(res, 404, { ok: false, error: "账号不存在" });
+    saveConfig();
+    return json(res, 200, { ok: true });
+  }
+
+  // POST /admin/account/test — 测试某个账号是否可用
+  if (req.method === "POST" && urlPath === "/admin/account/test") {
+    const a = (CONFIG.accounts || []).find(x => x.id === body.id);
+    if (!a) return json(res, 404, { ok: false, error: "账号不存在" });
+    try {
+      const sid = await imaInitSession("连通性测试", a);
+      markChecked(a, true);
+      saveConfig();
+      return json(res, 200, { ok: true, session_id: sid ? "ok" : "" });
+    } catch (e) {
+      markChecked(a, false, e);
+      saveConfig();
+      return json(res, 200, { ok: false, error: e.message });
+    }
+  }
+
+  // POST /admin/account/test-all — 检测全部账号（并发探测）
+  if (req.method === "POST" && urlPath === "/admin/account/test-all") {
+    const targets = (CONFIG.accounts || []).filter(a => a.enabled !== false && a.cookie);
+    const results = await Promise.all(targets.map(async (a) => {
+      try {
+        await imaInitSession("连通性测试", a);
+        markChecked(a, true);
+        return { id: a.id, name: a.name, ok: true };
+      } catch (e) {
+        markChecked(a, false, e);
+        return { id: a.id, name: a.name, ok: false, error: e.message };
+      }
+    }));
+    saveConfig();
+    const okN = results.filter(r => r.ok).length;
+    return json(res, 200, {
+      ok: true,
+      total: results.length,
+      available: okN,
+      failed: results.length - okN,
+      results,
+      accounts: accountStats(),
+    });
+  }
+
+  // POST /admin/account/refresh — 立即用 refresh_token 刷新该账号
+  if (req.method === "POST" && urlPath === "/admin/account/refresh") {
+    const a = (CONFIG.accounts || []).find(x => x.id === body.id);
+    if (!a) return json(res, 404, { ok: false, error: "账号不存在" });
+    if (!a.refresh_token) return json(res, 400, { ok: false, error: "该账号没有 refresh_token，无法自动刷新（只能重新粘贴 Cookie）" });
+    const r = await refreshAccount(a);
+    saveConfig();
+    return json(res, 200, r);
+  }
+
+  // POST /admin/keys/add — 生成新 Key 并替换（只保留这一个，旧 Key 立即失效）
+  if (req.method === "POST" && urlPath === "/admin/keys/add") {
+    const k = (body.key || "").trim() || genApiKey();
+    CONFIG.api_keys = [k];
+    saveConfig();
+    return json(res, 200, { ok: true, key: k });
+  }
+
+  // POST /admin/keys/delete — 删除调用 Key（删空则自动补一个新的，避免服务无 Key 可用）
+  if (req.method === "POST" && urlPath === "/admin/keys/delete") {
+    CONFIG.api_keys = (CONFIG.api_keys || []).filter(k => k !== body.key);
+    if (!CONFIG.api_keys.length) CONFIG.api_keys.push(genApiKey());
+    saveConfig();
+    return json(res, 200, { ok: true, api_keys: CONFIG.api_keys });
+  }
+
+  // POST /admin/config — 改默认模型 / 端口等
+  if (req.method === "POST" && urlPath === "/admin/config") {
+    if (body.default_model) CONFIG.default_model = body.default_model;
+    saveConfig();
+    return json(res, 200, { ok: true, default_model: CONFIG.default_model });
+  }
+
+  return json(res, 404, { ok: false, error: "unknown admin endpoint" });
+}
+
+// ============================================================
+// 12. 账号自动刷新（用 refresh_token）
+// ============================================================
+function calcBknAlt(t) {
+  let h = 5381;
+  for (let i = 0; i < t.length; i++) h = h + (h << 5) + t.charCodeAt(i);
+  return h & 0x7fffffff;
+}
+
+function httpPostJson(hostname, path, headers, bodyObj, timeout = 20000) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(bodyObj);
+    const req = https.request({
+      hostname, port: 443, path, method: "POST",
+      headers: { ...headers, "Content-Length": Buffer.byteLength(payload) },
+      timeout,
+    }, (res) => {
+      const zlib = require("zlib");
+      let stream = res;
+      const enc = res.headers["content-encoding"] || "";
+      if (enc === "gzip") stream = res.pipe(zlib.createGunzip());
+      const chunks = [];
+      stream.on("data", c => chunks.push(c));
+      stream.on("end", () => {
+        const raw = Buffer.concat(chunks).toString("utf-8");
+        try { resolve({ status: res.statusCode, data: JSON.parse(raw) }); }
+        catch { resolve({ status: res.statusCode, data: raw }); }
+      });
+      stream.on("error", reject);
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
+    req.write(payload); req.end();
+  });
+}
+
+// 调 ima.qq.com/auth_login/refresh 换新 token（实测服务端不校验 registration_id）
+async function refreshAccount(a) {
+  if (!a.refresh_token) return { ok: false, error: "缺少 refresh_token" };
+  const uid = cookieField(a.cookie, "IMA-UID");
+  const token = cookieField(a.cookie, "IMA-TOKEN");
+  const bkn = String(calcBknAlt(token));
+  try {
+    const { data } = await httpPostJson(
+      "ima.qq.com",
+      "/auth_login/refresh",
+      {
+        "from_browser_ima": "1",
+        "x-ima-cookie": a.cookie,
+        "x-ima-bkn": bkn,
+        referer: BASE_URL,
+        origin: BASE_URL,
+        "User-Agent": "okhttp/4.12.0",
+        "Content-Type": "application/json; charset=utf-8",
+        "Accept-Encoding": "gzip",
+      },
+      { refresh_token: a.refresh_token, user_id: uid, registration_id: a.registration_id || "" }
+    );
+    if (data && data.code === 0 && data.token) {
+      a.cookie = replaceCookieToken(a.cookie, data.token);
+      a.last_refresh = new Date().toISOString();
+      a.token_valid_time = Number(data.token_valid_time) || 7200;
+      a.last_error = null;
+      saveConfig();
+      return { ok: true, token_valid_time: data.token_valid_time || null };
+    }
+    const msg = (data && (data.msg || data.message)) ? `${data.code}: ${data.msg || data.message}` : JSON.stringify(data).slice(0, 200);
+    a.last_error = `refresh failed: ${msg}`;
+    saveConfig();
+    return { ok: false, error: a.last_error };
+  } catch (e) {
+    a.last_error = `refresh error: ${e.message}`;
+    saveConfig();
+    return { ok: false, error: a.last_error };
+  }
+}
+
+function replaceCookieToken(cookie, newToken) {
+  if (/IMA-TOKEN=/.test(cookie)) return cookie.replace(/IMA-TOKEN=[^;]*/, `IMA-TOKEN=${newToken}`);
+  return cookie + `; IMA-TOKEN=${newToken}`;
+}
+
+// 后台自动刷新循环：每 2 分钟检查，提前刷新快过期的
+function startRefresher() {
+  const INTERVAL = 2 * 60 * 1000;
+  setInterval(async () => {
+    for (const a of (CONFIG.accounts || [])) {
+      if (a.enabled === false || !a.refresh_token || !a.cookie) continue;
+      // 若上次刷新在 100 分钟内，则跳过（token 有效期约 2h）
+      if (a.last_refresh && (Date.now() - new Date(a.last_refresh).getTime()) < 100 * 60 * 1000) continue;
+      // 尝试刷新
+      const r = await refreshAccount(a);
+      if (r.ok) console.log(`[REFRESH] ${a.name} ok (valid ${r.token_valid_time || "?"}s)`);
+      else console.error(`[REFRESH] ${a.name} failed: ${r.error}`);
+    }
+  }, INTERVAL).unref();
+}
+
+// ============================================================
+// 13. 启动
+// ============================================================
+const PORT = Number(process.env.IMA2API_PORT) || CONFIG.server?.port || 8081;
 const HOST = CONFIG.server?.host || "0.0.0.0";
 
-http.createServer(router).listen(PORT, HOST, () => {
-  for (const [id] of Object.entries(MODELS)) {
+const server = http.createServer(router);
+server.on("error", (e) => {
+  if (e.code === "EADDRINUSE") {
+    console.error(`启动失败：端口 ${PORT} 已被占用。请改用其他端口（环境变量 IMA2API_PORT 或 config.json 的 server.port）。`);
+  } else {
+    console.error(`启动失败：${e.message}`);
   }
-  for (const k of API_KEYS) console.log(`║    ${maskKey(k).padEnd(44)}║`);
+  process.exit(1);
+});
+server.listen(PORT, HOST, () => {
+  console.log(`ima2api 已启动: http://${HOST}:${PORT}`);
+  console.log(`配置页: http://<NAS_IP>:${PORT}/   | 配置文件: ${CONFIG_FILE}`);
+  console.log(`账号数: ${(CONFIG.accounts || []).length}（可用 ${activeAccounts().length}）`);
+  if (!activeAccounts().length) {
+    console.log(`没有可用账号，请打开 http://<NAS_IP>:${PORT}/ 添加 Cookie`);
+  }
+  startRefresher();
 });

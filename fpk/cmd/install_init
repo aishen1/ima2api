@@ -1,0 +1,13 @@
+#!/bin/bash
+# 安装前：清理残留进程与 PID 文件
+LOG_FILE="${TRIM_PKGVAR:-/tmp/ima2api-var}/info.log"
+mkdir -p "$(dirname "${LOG_FILE}")" "${TRIM_PKGVAR:-/tmp/ima2api-var}" "${TRIM_PKGHOME:-/tmp}" "${TRIM_APPDEST:-/tmp}" 2>/dev/null || true
+log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - [install_init] $1" >> "${LOG_FILE}" 2>/dev/null || true; }
+
+log_msg "=== install_init start ==="
+pkill -9 -f "../server.js" 2>/dev/null || true
+pkill -9 -f "ima2api/server.js" 2>/dev/null || true
+sleep 1
+rm -f "${TRIM_PKGVAR}/app.pid" 2>/dev/null || true
+log_msg "=== install_init done ==="
+exit 0

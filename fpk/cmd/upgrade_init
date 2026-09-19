@@ -1,0 +1,8 @@
+#!/bin/bash
+# 升级前：停止旧进程
+LOG_FILE="${TRIM_PKGVAR:-/tmp/ima2api-var}/info.log"
+log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - [upgrade_init] $1" >> "${LOG_FILE}" 2>/dev/null || true; }
+log_msg "=== upgrade_init ==="
+"${TRIM_APPDEST}/cmd/main" stop >/dev/null 2>&1 || true
+pkill -9 -f "ima2api/server.js" 2>/dev/null || true
+exit 0

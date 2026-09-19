@@ -1,0 +1,5 @@
+#!/bin/bash
+# 卸载后：清理 PID 残留（保留用户数据目录，便于重装后恢复配置）
+LOG_FILE="/tmp/ima2api-uninstall.log"
+echo "$(date '+%Y-%m-%d %H:%M:%S') - [uninstall_callback] done" >> "${LOG_FILE}" 2>/dev/null || true
+exit 0

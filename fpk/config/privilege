@@ -1,0 +1,8 @@
+{
+  "defaults": {
+    "run-as": "package"
+  },
+  "username": "ima2api",
+  "groupname": "ima2api",
+  "join-groups": []
+}

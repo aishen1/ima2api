@@ -1,0 +1,8 @@
+#!/bin/bash
+# 升级后：保留用户配置（config.json 在 PKGVAR，不在包内，天然保留）
+LOG_FILE="${TRIM_PKGVAR:-/tmp/ima2api-var}/info.log"
+log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - [upgrade_callback] $1" >> "${LOG_FILE}" 2>/dev/null || true; }
+log_msg "=== upgrade_callback ==="
+chmod +x "${TRIM_APPDEST}/runtime/bin/node" 2>/dev/null || true
+log_msg "配置保留在 ${TRIM_PKGVAR}/config.json"
+exit 0

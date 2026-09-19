@@ -1,0 +1,149 @@
+#!/bin/bash
+# ima2api 运行控制：start / stop / status
+# 由 fnOS 应用中心调用
+
+# ---------- 解析 TRIM_* 路径（fnOS 有时不传，需从 /var/apps/<app> 的 symlink 推导）----------
+APPNAME="ima2api"
+app_link="/var/apps/${APPNAME}"
+
+if [ -z "${TRIM_APPDEST}" ] || [ ! -d "${TRIM_APPDEST}" ]; then
+    [ -e "${app_link}" ] && TRIM_APPDEST="$(readlink -f "${app_link}/target" 2>/dev/null)"
+fi
+if [ -z "${TRIM_PKGHOME}" ] || [ ! -d "${TRIM_PKGHOME}" ]; then
+    [ -L "${app_link}/home" ] && TRIM_PKGHOME="$(readlink -f "${app_link}/home" 2>/dev/null)"
+fi
+if [ -z "${TRIM_PKGVAR}" ] || [ ! -d "${TRIM_PKGVAR}" ]; then
+    [ -L "${app_link}/var" ] && TRIM_PKGVAR="$(readlink -f "${app_link}/var" 2>/dev/null)"
+fi
+# 兜底：按 APPDEST 推导
+if [ -z "${TRIM_PKGVAR}" ] && [ -n "${TRIM_APPDEST}" ]; then
+    _pv="$(echo "${TRIM_APPDEST}" | sed 's|/@appcenter/|/@appdata/|')"
+    [ -d "${_pv}" ] && TRIM_PKGVAR="${_pv}"
+fi
+
+TRIM_APPDEST="${TRIM_APPDEST:-/var/apps/${APPNAME}/target}"
+TRIM_PKGVAR="${TRIM_PKGVAR:-/var/apps/${APPNAME}/var}"
+
+APP_DIR="${TRIM_APPDEST}"
+CONFIG_DIR="${TRIM_PKGVAR}"
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+PORT="${IMA2API_PORT:-8088}"
+
+mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}" 2>/dev/null || true
+}
+
+check_process() {
+    [ -n "$1" ] && kill -0 "$1" 2>/dev/null
+}
+
+# ---------- 找 node 运行时 ----------
+NODE_BIN=""
+resolve_node() {
+    # 1) 包内自带
+    for c in "${APP_DIR}/runtime/bin/node" "${APP_DIR}/node/bin/node" "${APP_DIR}/node"; do
+        if [ -x "$c" ]; then NODE_BIN="$c"; return 0; fi
+    done
+    # 2) 应用中心 Node.js
+    for c in /var/apps/nodejs_v24/target/bin/node \
+             /var/apps/nodejs_v22/target/bin/node \
+             /var/apps/nodejs_v20/target/bin/node; do
+        if [ -x "$c" ]; then NODE_BIN="$c"; return 0; fi
+    done
+    # 3) PATH
+    if command -v node >/dev/null 2>&1; then NODE_BIN="$(command -v node)"; return 0; fi
+    return 1
+}
+
+status() {
+    if [ -f "${PID_FILE}" ]; then
+        pid="$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')"
+        if check_process "${pid}"; then return 0; fi
+        rm -f "${PID_FILE}"
+    fi
+    # 兜底：按端口找
+    if command -v ss >/dev/null 2>&1 && ss -tln 2>/dev/null | grep -q ":${PORT} "; then
+        return 0
+    fi
+    return 1
+}
+
+start_process() {
+    if status; then
+        log_msg "already running, skip start"
+        return 0
+    fi
+
+    if ! resolve_node; then
+        log_msg "ERROR: 找不到 node 运行时（包内 runtime 与 nodejs_v24 均不可用）"
+        return 1
+    fi
+    log_msg "node = ${NODE_BIN} ($(${NODE_BIN} -v 2>/dev/null))"
+
+    if [ ! -f "${APP_DIR}/server.js" ]; then
+        log_msg "ERROR: ${APP_DIR}/server.js 不存在"
+        return 1
+    fi
+
+    # 配置由 server.js 自行生成（它会按 IMA2API_PORT 环境变量决定端口）
+
+    log_msg "Starting ima2api on port ${PORT} ..."
+    cd "${APP_DIR}" || return 1
+    IMA2API_CONFIG_DIR="${CONFIG_DIR}" IMA2API_PORT="${PORT}" \
+        "${NODE_BIN}" "${APP_DIR}/server.js" >> "${LOG_FILE}" 2>&1 &
+    printf "%s" "$!" > "${PID_FILE}"
+
+    # 就绪检测：最多等 15 秒
+    local i=0
+    while [ ${i} -lt 15 ]; do
+        sleep 1
+        if command -v curl >/dev/null 2>&1; then
+            if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:${PORT}/health"; then
+                log_msg "启动成功（耗时 $((i+1))s），配置页 http://<NAS_IP>:${PORT}/"
+                return 0
+            fi
+        else
+            if check_process "$(cat "${PID_FILE}" 2>/dev/null)"; then
+                log_msg "启动成功（无 curl，仅确认进程存活）"
+                return 0
+            fi
+        fi
+        i=$((i + 1))
+    done
+    log_msg "WARN: 15 秒内未探活成功，进程可能仍在启动中"
+    return 0
+}
+
+stop_process() {
+    log_msg "Stopping process ..."
+    if [ -r "${PID_FILE}" ]; then
+        pid="$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')"
+        if check_process "${pid}"; then
+            kill -TERM "${pid}" 2>/dev/null
+            local count=0
+            while check_process "${pid}" && [ ${count} -lt 10 ]; do
+                sleep 1
+                count=$((count + 1))
+            done
+            if check_process "${pid}"; then
+                kill -KILL "${pid}" 2>/dev/null
+                sleep 1
+            fi
+        fi
+        rm -f "${PID_FILE}"
+    fi
+    # 清理可能残留的同名进程
+    pkill -f "${APP_DIR}/server.js" 2>/dev/null || true
+    log_msg "stopped"
+    return 0
+}
+
+case "$1" in
+start)  start_process ;;
+stop)   stop_process ;;
+status) if status; then exit 0; else exit 3; fi ;;
+*)      exit 1 ;;
+esac

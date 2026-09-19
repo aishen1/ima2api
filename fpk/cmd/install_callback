@@ -1,0 +1,19 @@
+#!/bin/bash
+# 安装后：确保配置目录与权限正确，并启动服务
+LOG_FILE="${TRIM_PKGVAR:-/tmp/ima2api-var}/info.log"
+log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - [install_callback] $1" >> "${LOG_FILE}" 2>/dev/null || true; }
+
+log_msg "=== install_callback start ==="
+log_msg "APPDEST=${TRIM_APPDEST} PKGHOME=${TRIM_PKGHOME} PKGVAR=${TRIM_PKGVAR}"
+
+mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true
+
+APP_DIR="${TRIM_APPDEST}"
+# 配置文件由 server.js 首次启动时自动生成（端口取自 IMA2API_PORT 环境变量）
+
+# 确保可执行
+chmod +x "${TRIM_APPDEST}/runtime/bin/node" 2>/dev/null || true
+chmod +x "${APP_DIR}/server.js" 2>/dev/null || true
+
+log_msg "=== install_callback done ==="
+exit 0

@@ -1,0 +1,13 @@
+{
+    ".url": {
+        "ima2api.Application": {
+            "title": "ima2api",
+            "icon": "images/icon_{0}.png",
+            "type": "url",
+            "protocol": "http",
+            "port": "8088",
+            "url": "/",
+            "allUsers": false
+        }
+    }
+}

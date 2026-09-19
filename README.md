@@ -4,13 +4,23 @@
 >
 > 基于上游 [1icc0/ima2api](https://github.com/1icc0/ima2api)，本 fork 增加了：
 >
+> - **多账号支持** —— 账号池 + 轮询 + 故障切换；一个账号登录失效自动切下一个，
+>   全部不可用才报错。会话按「账号+会话」隔离，不会串台
+> - **网页配置页**（`GET /`）—— 粘贴 Cookie 添加账号、启停/改名/删除、
+>   查看调用地址与 API Key、一键复制、检测有效性、手动续期。**无需再手工编辑 config.json**
+> - **账号有效性显示** —— 区分「有效 / 已失效 / 异常 / 缺凭据 / 已停用 / 未验证」，
+>   并把「凭据失效」与「网络抖动」分开，避免网络一抖就误让你重新抓包
+> - **服务内置自动续期** —— 每 2 分钟检查、提前约 20 分钟刷新；
+>   **刷新后无需重启进程**（旧版把 Cookie 读进内存，每次刷新都得重启）
+> - **飞牛 fnOS 应用包（.fpk）** —— 见 [`fpk/`](fpk/)，自带 node 运行时，
+>   安装后从桌面图标打开配置页。打包脚本：[`fpk/build.sh`](fpk/build.sh)
 > - **`ima_autorefresh.py`** —— 不依赖 `registration_id` 的 Cookie 自动刷新器
 >   （实测 `ima.qq.com/auth_login/refresh` 根本不校验该字段，上游 `ima_runner.py`
->   第 91 行的检查反而会拦掉刷新）
-> - **保活 + 开机自启** —— 配合 `ima2api-boot.sh` 与 crontab 使用
+>   第 91 行的检查反而会拦掉刷新）。**新版的自动续期已内置到 server.js，
+>   此脚本仅在用旧版 server.js 时才需要**
 > - **`config.example.json`** —— 凭据占位模板（真实 `config.json` 已被 .gitignore）
 >
-> 详见下方《自动刷新（修复版）》一节。
+> 详见《多账号与网页配置》与《自动刷新》两节。
 >
 > ---
 
@@ -21,37 +31,113 @@
 
 ## 快速开始
 
+### 方式一：网页配置（推荐）
+
+```bash
+npm install
+node server.js
+# 打开 http://<本机IP>:8081/  → 粘贴 Cookie 添加账号
+```
+
+服务会自动生成含随机 API Key 的 `config.json`，账号与 Key 的变化立即落盘。
+
+### 方式二：手工配置
+
 ```bash
 cd ima2api
 npm install
-python3 ima_runner.py
+cp config.example.json config.json   # 然后手工填 cookie
+node server.js
 ```
+
+### 飞牛 fnOS 一键安装包
+
+```bash
+./fpk/build.sh                                   # 生成 fpk/ima2api.fpk
+appcenter-cli install-fpk fpk/ima2api.fpk
+```
+
+## 环境变量
+
+| 变量 | 说明 |
+|------|------|
+| `IMA2API_CONFIG_DIR` | 配置文件所在目录（默认脚本同目录）。fpk 安装时指向应用数据目录，使配置在升级后保留 |
+| `IMA2API_PORT` | 监听端口，优先于 `config.json` 的 `server.port` |
 
 ## 配置
 
-编辑 `config.json`：
+### 推荐：用网页配置页
+
+打开 `http://<本机IP>:8081/`，粘贴 Cookie 即可添加账号，支持多账号。
+服务首次启动会自动生成 `config.json`（含随机 API Key），无需手写。
+
+### 手工编辑 config.json
 
 ```json5
 {
-  "server": { "port": 8080, "host": "0.0.0.0" },
-  "auth": {
-    // 从 IMA App 抓包获取的完整 Cookie
-    "cookie": "IMA-GUID=...;IMA-TOKEN=...;...",
-    "refresh_token": "抓包https://ima.qq.com/auth_login/refresh请求获取",
-    "registration_id": "抓包https://ima.qq.com/auth_login/refresh请求获取"
-  },
-  "api_keys": ["sk-ima-demo-key-change-me"],
-  "default_model": "glm-5.2"
+  "server": { "port": 8081, "host": "0.0.0.0" },
+  "api_keys": ["sk-ima-请自定一个密钥"],
+  "default_model": "hy3-preview",
+  "accounts": [
+    {
+      "id": "<自动生成，可留空>",
+      "name": "主号",
+      "cookie": "IMA-GUID=...; IMA-UID=...; IMA-TOKEN=...; IMA-REFRESH-TOKEN=...",
+      "refresh_token": "<抓 IMA-REFRESH-TOKEN，用于自动续期>",
+      "enabled": true
+    }
+  ],
+  "models": { "hy3-preview": { "type": 0, "id": "official_0", "name": "Tencent Hy3 preview" } }
 }
 ```
+
+> 旧版单账号格式（`auth.cookie`）**会被自动迁移**成 `accounts[0]`，无需手工转换。
 
 ### 获取 Cookie
 
 1. 手机安装 IMA App，QQ/微信登录
 2. 配置 HTTPS 代理（mitmproxy / Charles / Fiddler）
-3. 发送任意消息，复制请求中的 `x-ima-cookie` 值
-4. 填入 `config.json` → `auth.cookie`
-5. 将 https://ima.qq.com/auth_login/refresh 这条请求里的refresh_token和registration_id也填入config.json (用于自动刷新cookie)
+3. 发送任意消息，复制请求头里的 `x-ima-cookie` **完整值**（其中已含 `IMA-REFRESH-TOKEN`）
+4. 粘贴到配置页即可 —— 无需再单独抓 `https://ima.qq.com/auth_login/refresh`
+
+## 多账号与网页配置
+
+配置页（`GET /`）提供：
+
+| 功能 | 说明 |
+|------|------|
+| 添加账号 | 粘贴 Cookie 即可，可加任意多个 |
+| 有效性显示 | **有效 / 已失效 / 异常 / 缺凭据 / 已停用 / 未验证** 六态徽标 |
+| 剩余有效期 | 由「最近续期时间 + 接口返回的有效秒数」推算，临近过期变橙色警示 |
+| 检测全部账号 | 一次并发探测所有启用账号，真实请求验证 Cookie |
+| 立即续期 | 用 `refresh_token` 换新 token，无需重启服务 |
+| 启停 / 改名 / 删除 | 停用的账号不参与调用 |
+| 调用信息 | 直接显示 OpenAI / Anthropic 地址与 API Key，可一键复制 |
+| 重新生成 Key | **替换**当前 Key（只保留一个），旧 Key 立即失效 |
+
+### 账号调度
+
+- 每次请求按**轮询**选账号，失败则**自动切下一个**；全部失败才报错
+- 会话按「账号 + 会话」隔离，多账号之间不会串台
+- 鉴权失败（登录过期）与网络抖动**区别对待**：前者换账号，后者重试
+
+### 有效性状态含义
+
+| 状态 | 含义 | 建议 |
+|------|------|------|
+| 有效 | 最近一次真实调用成功 | — |
+| 已失效 | 上游明确回鉴权失败 | 重新粘贴 Cookie，或点「立即续期」 |
+| 异常 | 非鉴权错误（超时/断连） | 点「测试」复查，通常重试即可 |
+| 缺凭据 | 没有 Cookie | 更新 Cookie |
+| 已停用 | 手动停用 | 点「启用」恢复 |
+| 未验证 | 刚添加，尚未发起请求 | 点「测试」 |
+
+### 账号状态字段（供脚本读取）
+
+`GET /admin/state` 返回每个账号的 `state`、`remain_seconds`、`expire_at`、
+`last_ok`、`last_check`、`last_error`、`last_error_kind` 等。
+
+> ⚠️ 管理接口（`/admin/*`）**仅允许内网/本机访问**，公网来源返回 403。
 
 ## API 端点
 
@@ -203,9 +289,27 @@ with client.messages.stream(
 
 ---
 
-## 自动刷新（修复版）
+## 自动刷新
 
-### 问题
+### ✅ 新版已内置（推荐）
+
+`server.js` 自带自动续期，**无需任何外部脚本**：
+
+- 每 2 分钟检查一次，token（有效期约 2h）提前约 20 分钟自动刷新
+- 刷新后**不需要重启进程** —— 每次请求现算请求头，刷完立即生效
+- 配置页每个账号有「立即续期」按钮，可手动触发
+- 没有 `refresh_token` 的账号会被跳过（只能重新粘贴 Cookie）
+
+只需在添加账号时让 `refresh_token` 有值 —— 从 `x-ima-cookie` 里的
+`IMA-REFRESH-TOKEN` 自动提取，抓包时无需额外操作。
+
+> **实测结论**：`refresh_token` **不会轮换**，同一个可长期反复使用。
+
+### 旧版：外部刷新脚本 `ima_autorefresh.py`
+
+仅在你使用**旧版 server.js** 时才需要下面这套。
+
+#### 问题
 
 上游 `ima_runner.py` 要求 `config.json` 里 `auth.registration_id` 非空：
 
@@ -217,7 +321,7 @@ if not registration_id:
 
 但抓 `registration_id` 很麻烦（需要抓 `https://ima.qq.com/auth_login/refresh` 请求体）。
 
-### 实测结论：根本不需要它
+#### 实测结论：根本不需要它
 
 对 `https://ima.qq.com/auth_login/refresh` 直接发请求：
 
@@ -229,7 +333,7 @@ if not registration_id:
 **服务端不校验这个字段。** 而且 `refresh_token` **不会轮换**（刷新只返回新 token），
 所以一份 refresh_token 可以无限使用。
 
-### 用法
+#### 用法
 
 ```bash
 # 常驻：自动刷新 + 保活（推荐）
@@ -248,7 +352,7 @@ python3 ima_autorefresh.py --check
 - server.js / 刷新器挂了 → 自动拉起
 - 每 2 分钟检查一次；日志写 `ima_autorefresh.log`
 
-### 开机自启（fnOS 示例）
+#### 开机自启（fnOS 示例）
 
 配 `ima2api-boot.sh`（幂等），然后 crontab：
 

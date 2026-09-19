@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ima2api 配置</title>
+<style>
+  :root{
+    --bg:#0f1115; --card:#171a21; --card2:#1e222b; --line:#2a2f3a;
+    --fg:#e6e8ee; --muted:#8b93a7; --pri:#4f8cff; --ok:#35c07a; --err:#ff5f6d; --warn:#f5a623;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  .wrap{max-width:960px;margin:0 auto;padding:28px 18px 80px}
+  h1{font-size:22px;margin:0 0 4px}
+  h2{font-size:15px;margin:0 0 14px;color:var(--fg)}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:22px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:18px}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+  .row>*{flex:1;min-width:0}
+  input,textarea,select{
+    width:100%;background:var(--card2);border:1px solid var(--line);color:var(--fg);
+    border-radius:8px;padding:10px 12px;font:inherit;outline:none
+  }
+  input:focus,textarea:focus{border-color:var(--pri)}
+  textarea{resize:vertical;min-height:76px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+  label.f{display:block;font-size:12px;color:var(--muted);margin:0 0 5px}
+  .field{margin-bottom:12px}
+  button{
+    background:var(--pri);color:#fff;border:0;border-radius:8px;padding:10px 16px;
+    font:inherit;font-weight:600;cursor:pointer;white-space:nowrap
+  }
+  button:hover{filter:brightness(1.1)}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--fg);font-weight:500}
+  button.danger{background:transparent;border:1px solid #573;color:var(--err)}
+  button.sm{padding:6px 10px;font-size:12.5px}
+  .acct{background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:10px}
+  .acct .top{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+  .acct .name{font-weight:600}
+  .acct .meta{color:var(--muted);font-size:12px;font-family:ui-monospace,monospace;word-break:break-all}
+  .acct .acts{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+  .pill{font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted)}
+  .pill.on{color:var(--ok);border-color:#1e5a3c;background:#0f2a1e}
+  .pill.off{color:var(--muted)}
+  .pill.err{color:var(--err);border-color:#5a1e24;background:#2a1013}
+  .pill.warn{color:var(--warn);border-color:#5a441e;background:#2a2013}
+  .kv{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+  .kv .k{color:var(--muted);font-size:12px;min-width:82px}
+  code.box{
+    flex:1;min-width:260px;background:#0b0d11;border:1px solid var(--line);border-radius:8px;
+    padding:9px 12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;
+    overflow:auto;white-space:nowrap
+  }
+  .muted{color:var(--muted);font-size:12.5px}
+  .toast{
+    position:fixed;left:50%;bottom:26px;transform:translateX(-50%);
+    background:#22262f;border:1px solid var(--line);border-radius:9px;padding:11px 18px;
+    box-shadow:0 8px 30px rgba(0,0,0,.5);opacity:0;transition:.25s;pointer-events:none;max-width:88vw
+  }
+  .toast.show{opacity:1}
+  .toast.ok{border-color:#1e5a3c}.toast.err{border-color:#5a1e24}
+  details summary{cursor:pointer;color:var(--muted);font-size:13px}
+  .sep{height:1px;background:var(--line);margin:16px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ima2api 配置</h1>
+  <div class="sub">添加 IMA Cookie 账号（可多个），复制本地调用地址与 Key</div>
+
+  <!-- 调用信息 -->
+  <div class="card">
+    <h2>本地调用信息</h2>
+    <div class="kv"><span class="k">OpenAI 地址</span><code class="box" id="openaiBase">—</code><button class="ghost sm" onclick="cp('openaiBase')">复制</button></div>
+    <div class="kv"><span class="k">Anthropic 地址</span><code class="box" id="anthropicBase">—</code><button class="ghost sm" onclick="cp('anthropicBase')">复制</button></div>
+    <div class="kv"><span class="k">默认模型</span>
+      <select id="defaultModel" style="max-width:220px"></select>
+      <span class="muted" id="modelCount"></span>
+    </div>
+    <div class="sep"></div>
+    <div class="kv"><span class="k">API Key</span><code class="box" id="apiKey">—</code><button class="ghost sm" onclick="cp('apiKey')">复制</button></div>
+    <div class="row" style="margin-top:6px">
+      <button class="ghost sm" onclick="genKey()">重新生成</button>
+      <span class="muted" style="align-self:center">重新生成会替换当前 Key，旧 Key 立即失效（只有一个 Key 生效）</span>
+    </div>
+  </div>
+
+  <!-- 添加账号 -->
+  <div class="card">
+    <h2>添加账号</h2>
+    <div class="field">
+      <label class="f">备注名（可选）</label>
+      <input id="newName" placeholder="例如：主号 / 小号">
+    </div>
+    <div class="field">
+      <label class="f">Cookie（粘贴完整的 x-ima-cookie 值）</label>
+      <textarea id="newCookie" placeholder="IMA-GUID=...; IMA-UID=...; IMA-TOKEN=...; IMA-REFRESH-TOKEN=...;"></textarea>
+    </div>
+    <div class="field">
+      <label class="f">refresh_token（可选，填了才能自动续期；留空则尝试从 Cookie 的 IMA-REFRESH-TOKEN 提取）</label>
+      <input id="newRefresh" placeholder="可留空">
+    </div>
+    <button onclick="addAccount()">添加账号</button>
+    <div class="muted" style="margin-top:10px">
+      获取方式：手机 IMA App → 配置 HTTPS 代理抓包 → 发消息时复制请求头 <code>x-ima-cookie</code> 的完整值
+    </div>
+  </div>
+
+  <!-- 账号列表 -->
+  <div class="card">
+    <h2>账号列表 <span class="muted" id="acctSummary"></span></h2>
+    <div class="row" style="margin-bottom:14px">
+      <button class="ghost sm" onclick="testAll()" style="flex:0 0 auto">检测全部账号</button>
+      <span class="muted" style="align-self:center" id="checkHint">检测会真实请求一次 IMA，用于确认 Cookie 是否仍有效</span>
+    </div>
+    <div id="acctList"></div>
+    <div class="muted" id="acctEmpty" style="display:none">还没有账号，请在上方添加。</div>
+  </div>
+
+  <details class="card">
+    <summary>高级：当前调用的 Key</summary>
+    <div id="keyList" style="margin-top:14px"></div>
+  </details>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let STATE = null;
+
+// 账号有效性状态 → 徽标文案/样式/建议
+const STATE_LABEL = {
+  ok:       { text:'有效',   cls:'on',   hint:'' },
+  invalid:  { text:'已失效', cls:'err',  hint:'Cookie 已过期，请点「更新 Cookie」重新粘贴，或点「立即续期」' },
+  error:    { text:'异常',   cls:'warn', hint:'最近请求出错（可能是网络或上游抖动），可点「测试」复查' },
+  nocookie: { text:'缺凭据', cls:'err',  hint:'没有 Cookie，请更新 Cookie' },
+  disabled: { text:'已停用', cls:'off',  hint:'已停用，不参与调用；点「启用」恢复' },
+  unknown:  { text:'未验证', cls:'off',  hint:'尚未检测，点「测试」验证有效性' },
+};
+
+function fmtTime(iso){
+  if(!iso) return '';
+  const d = new Date(iso);
+  if(isNaN(d)) return String(iso);
+  const p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function toast(msg, kind){
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + (kind || '');
+  clearTimeout(t._t);
+  t._t = setTimeout(()=>{ t.className='toast'; }, 2200);
+}
+async function api(path, body){
+  const opt = body ? {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)} : {method:'GET'};
+  const r = await fetch(path, opt);
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
+  return j;
+}
+function cp(id){
+  const el = $(id);
+  const txt = el.textContent.trim();
+  navigator.clipboard.writeText(txt).then(()=>toast('已复制','ok')).catch(()=>toast('复制失败，请手动选择','err'));
+}
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function load(){
+  STATE = await api('/admin/state');
+  $('openaiBase').textContent = STATE.openai_base;
+  $('anthropicBase').textContent = STATE.anthropic_base;
+  $('apiKey').textContent = STATE.api_keys.length ? STATE.api_keys[STATE.api_keys.length - 1].value : '（无）';
+
+  const sel = $('defaultModel');
+  sel.innerHTML = Object.keys(STATE.models).map(m =>
+    `<option value="${esc(m)}" ${m===STATE.default_model?'selected':''}>${esc(m)}</option>`).join('');
+  $('modelCount').textContent = Object.keys(STATE.models).length + ' 个模型';
+
+  const list = $('acctList');
+  const accts = STATE.accounts || [];
+  $('acctEmpty').style.display = accts.length ? 'none' : 'block';
+  $('acctSummary').textContent = accts.length ? `（共 ${accts.length} 个，可用 ${STATE.active_accounts} 个）` : '';
+  list.innerHTML = accts.map(a => {
+    const st = STATE_LABEL[a.state] || STATE_LABEL.unknown;
+    const pills = [];
+    pills.push(`<span class="pill ${st.cls}">${st.text}</span>`);
+    pills.push(a.has_refresh_token ? '<span class="pill on">可自动续期</span>' : '<span class="pill off">无续期票据</span>');
+    // 剩余有效期
+    let expire = '';
+    if(a.remain_seconds != null){
+      const hrs = Math.floor(a.remain_seconds/3600);
+      const mins = Math.max(0, Math.floor((a.remain_seconds%3600)/60));
+      const soon = a.remain_seconds < 900;
+      expire = `<span class="pill ${soon?'warn':'off'}">剩余 ${hrs}h${mins}m</span>`;
+    }
+    const err = a.last_error ? `<div class="meta" style="color:var(--err);margin-top:4px">最近错误：${esc(a.last_error)}${a.last_error_kind==='auth'?'（凭据失效，需重新登录）':''}</div>` : '';
+    const hint = st.hint ? `<div class="meta" style="margin-top:4px">${st.hint}</div>` : '';
+    return `<div class="acct">
+      <div class="top"><span class="name">${esc(a.name)}</span>${pills.join('')}${expire}</div>
+      <div class="meta">Cookie：${esc(a.cookie_masked)}</div>
+      <div class="meta">成功 ${a.ok_count||0} 次 · 失败 ${a.fail_count||0} 次${a.last_ok?' · 最近成功 '+esc(fmtTime(a.last_ok)):''}${a.last_refresh?' · 最近续期 '+esc(fmtTime(a.last_refresh)):''}${a.last_check?' · 最近检测 '+esc(fmtTime(a.last_check)):''}</div>
+      ${expire && a.expire_at ? `<div class="meta">预计失效：${esc(fmtTime(a.expire_at))}</div>` : ''}
+      ${hint}
+      ${err}
+      <div class="acts">
+        <button class="ghost sm" onclick="testAcct('${a.id}')">测试</button>
+        ${a.has_refresh_token?`<button class="ghost sm" onclick="refreshAcct('${a.id}')">立即续期</button>`:''}
+        <button class="ghost sm" onclick="toggleAcct('${a.id}',${!a.enabled})">${a.enabled?'停用':'启用'}</button>
+        <button class="ghost sm" onclick="renameAcct('${a.id}','${esc(a.name)}')">改名</button>
+        <button class="ghost sm" onclick="updateCookie('${a.id}')">更新 Cookie</button>
+        <button class="danger sm" onclick="delAcct('${a.id}',${esc(JSON.stringify(a.name))})">删除</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  $('keyList').innerHTML = STATE.api_keys.length
+    ? STATE.api_keys.map(k =>
+        `<div class="kv"><code class="box">${esc(k.value)}</code>
+         <button class="ghost sm" onclick="navigator.clipboard.writeText('${esc(k.value)}').then(()=>toast('已复制','ok'))">复制</button></div>`).join('')
+      + '<div class="muted">同一时间只有一个 Key 生效。需要更换请点上方「重新生成」。</div>'
+    : '<div class="muted">无</div>';
+}
+
+async function addAccount(){
+  const cookie = $('newCookie').value.trim();
+  if(!cookie) return toast('请粘贴 Cookie','err');
+  try{
+    await api('/admin/account/add',{cookie,name:$('newName').value.trim(),refresh_token:$('newRefresh').value.trim()});
+    $('newCookie').value=''; $('newRefresh').value=''; $('newName').value='';
+    toast('已添加','ok'); await load();
+  }catch(e){ toast(e.message,'err'); }
+}
+async function delAcct(id,name){
+  if(!confirm('确认删除账号「'+name+'」？')) return;
+  await api('/admin/account/delete',{id}); toast('已删除','ok'); await load();
+}
+async function toggleAcct(id,enabled){
+  await api('/admin/account/update',{id,enabled}); await load();
+}
+async function renameAcct(id,old){
+  const n = prompt('新名称',old); if(n===null) return;
+  await api('/admin/account/update',{id,name:n}); await load();
+}
+async function updateCookie(id){
+  const c = prompt('粘贴新的完整 Cookie'); if(!c) return;
+  const r = await api('/admin/account/update',{id,cookie:c});
+  if(r.ok){ toast('已更新','ok'); await load(); }
+}
+async function testAcct(id){
+  toast('测试中…');
+  try{ const r = await api('/admin/account/test',{id});
+    toast(r.ok?'账号可用 ✓':('失败：'+r.error), r.ok?'ok':'err'); await load();
+  }catch(e){ toast(e.message,'err'); }
+}
+async function testAll(){
+  const n = (STATE && STATE.accounts) ? STATE.accounts.filter(a=>a.enabled).length : 0;
+  if(!n) return toast('没有可检测的账号','err');
+  $('checkHint').textContent = `检测中…（${n} 个账号）`;
+  try{
+    const r = await api('/admin/account/test-all',{});
+    $('checkHint').textContent = `检测完成：可用 ${r.available} / ${r.total} 个`;
+    toast(r.failed === 0 ? `全部可用（${r.available}/${r.total}）` : `可用 ${r.available}/${r.total}，${r.failed} 个异常`,
+          r.failed === 0 ? 'ok' : 'err');
+    await load();
+  }catch(e){
+    $('checkHint').textContent = '检测失败：' + e.message;
+    toast(e.message,'err');
+  }
+}
+async function refreshAcct(id){
+  toast('续期中…');
+  try{ const r = await api('/admin/account/refresh',{id});
+    toast(r.ok?('续期成功'+(r.token_valid_time?'（有效期 '+r.token_valid_time+'s）':'')):('续期失败：'+r.error), r.ok?'ok':'err'); await load();
+  }catch(e){ toast(e.message,'err'); }
+}
+async function genKey(){
+  if(!confirm('重新生成会替换当前 Key，使用旧 Key 的客户端将立即失效。\n\n确认继续？')) return;
+  try{ const r = await api('/admin/keys/add',{});
+    await load(); toast('已生成并替换为新 Key','ok');
+  }catch(e){ toast(e.message,'err'); }
+}
+async function delKey(k){
+  if(!confirm('删除这个 Key？使用该 Key 的客户端会立即失效')) return;
+  await api('/admin/keys/delete',{key:k}); await load(); toast('已删除','ok');
+}
+$('defaultModel').addEventListener('change', async e=>{
+  try{ await api('/admin/config',{default_model:e.target.value}); toast('已切换默认模型','ok'); }
+  catch(err){ toast(err.message,'err'); }
+});
+
+load().catch(e=>{ document.querySelector('.wrap').insertAdjacentHTML('afterbegin',
+  '<div class="card" style="border-color:#5a1e24">加载失败：'+esc(e.message)+'<br><span class="muted">请确认从内网访问本页，且服务已启动。</span></div>'); });
+</script>
+</body>
+</html>
