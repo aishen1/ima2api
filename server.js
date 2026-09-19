@@ -1745,9 +1745,63 @@ function readBody(req) {
   });
 }
 
+// 实际监听端口（env 优先，其次 config）
+function activePort() {
+  return Number(process.env.IMA2API_PORT) || CONFIG.server?.port || 8081;
+}
+
+// 本机内网 IPv4（缓存）。手机等外部设备访问时不能给 127.0.0.1。
+let _lanIpCache = null;
+function lanIp() {
+  if (_lanIpCache !== null) return _lanIpCache;
+  _lanIpCache = "";
+  try {
+    const cands = [];
+    const ifaces = os.networkInterfaces();
+    for (const name of Object.keys(ifaces)) {
+      for (const ni of (ifaces[name] || [])) {
+        if (ni.family !== "IPv4" || ni.internal) continue;
+        if (/^169\.254\./.test(ni.address)) continue; // link-local，没用
+        cands.push(ni.address);
+      }
+    }
+    const pick =
+      cands.find(a => /^192\.168\./.test(a)) ||
+      cands.find(a => /^10\./.test(a)) ||
+      cands.find(a => /^172\.(1[6-9]|2\d|3[01])\./.test(a)) ||
+      cands[0];
+    if (pick) _lanIpCache = pick;
+  } catch { /* 拿不到就退回 127.0.0.1 */ }
+  return _lanIpCache;
+}
+
+// 全部候选内网 IPv4（供页面提示用）
+function lanIpAll() {
+  const out = [];
+  try {
+    const ifaces = os.networkInterfaces();
+    for (const name of Object.keys(ifaces)) {
+      for (const ni of (ifaces[name] || [])) {
+        if (ni.family !== "IPv4" || ni.internal) continue;
+        if (/^169\.254\./.test(ni.address)) continue;
+        out.push(ni.address);
+      }
+    }
+  } catch { /* ignore */ }
+  return out;
+}
+
+// 调用地址：优先用户显式配置的 public_base，
+// 否则用请求的 Host；Host 缺失或指向 loopback 时换成本机内网 IP。
 function serverBase(req) {
-  const host = (req.headers.host || "").split(":")[0] || "127.0.0.1";
-  return `http://${host}:${CONFIG.server?.port || 8081}`;
+  const override = (CONFIG.server?.public_base || "").trim().replace(/\/+$/, "");
+  if (override) return override;
+  const rawHost = ((req && req.headers && req.headers.host) || "").trim().split(":")[0];
+  let host = rawHost;
+  if (!host || /^(127\.|localhost$|::1$|0\.0\.0\.0$)/i.test(host)) {
+    host = lanIp() || host || "127.0.0.1";
+  }
+  return `http://${host}:${activePort()}`;
 }
 
 async function adminApi(req, res, urlPath) {
@@ -1760,15 +1814,34 @@ async function adminApi(req, res, urlPath) {
       api_keys: (CONFIG.api_keys || []).map(k => ({ masked: maskKey(k), value: k })),
       models: getModels(),
       default_model: getDefaultModel(),
-      port: CONFIG.server?.port || 8081,
+      port: activePort(),
       base_url: serverBase(req),
       openai_base: serverBase(req) + "/v1",
       anthropic_base: serverBase(req) + "/v1",
+      lan_ips: lanIpAll(),
+      public_base: CONFIG.server?.public_base || "",
       config_file: CONFIG_FILE,
     });
   }
 
   const body = req.method === "POST" ? await readBody(req) : {};
+
+  // POST /admin/server/base — 设置对外调用地址前缀（留空=自动检测）
+  if (req.method === "POST" && urlPath === "/admin/server/base") {
+    const v = (body.public_base || "").trim().replace(/\/+$/, "");
+    if (v && !/^https?:\/\/[^\s/]+/i.test(v)) {
+      return json(res, 400, { ok: false, error: "格式不对，示例：http://192.168.1.10:8088" });
+    }
+    CONFIG.server = CONFIG.server || {};
+    if (v) CONFIG.server.public_base = v; else delete CONFIG.server.public_base;
+    saveConfig();
+    return json(res, 200, {
+      ok: true,
+      base_url: serverBase(req),
+      openai_base: serverBase(req) + "/v1",
+      anthropic_base: serverBase(req) + "/v1",
+    });
+  }
 
   // POST /admin/account/add — 新增账号
   if (req.method === "POST" && urlPath === "/admin/account/add") {

@@ -45,12 +45,14 @@
   .pill.off{color:var(--muted)}
   .pill.err{color:var(--err);border-color:#5a1e24;background:#2a1013}
   .pill.warn{color:var(--warn);border-color:#5a441e;background:#2a2013}
-  .kv{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
-  .kv .k{color:var(--muted);font-size:12px;min-width:82px}
+  .kv{display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+  .kv .k{color:var(--muted);font-size:12px;flex:0 0 100%;margin-bottom:-4px}
   code.box{
-    flex:1;min-width:260px;background:#0b0d11;border:1px solid var(--line);border-radius:8px;
+    flex:1 1 180px;min-width:0;
+    background:#0b0d11;border:1px solid var(--line);border-radius:8px;
     padding:9px 12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;
-    overflow:auto;white-space:nowrap
+    white-space:normal;overflow-wrap:anywhere;word-break:break-all;line-height:1.5;
+    -webkit-user-select:all;user-select:all
   }
   .muted{color:var(--muted);font-size:12.5px}
   .toast{
@@ -72,14 +74,36 @@
   <!-- 调用信息 -->
   <div class="card">
     <h2>本地调用信息</h2>
-    <div class="kv"><span class="k">OpenAI 地址</span><code class="box" id="openaiBase">—</code><button class="ghost sm" onclick="cp('openaiBase')">复制</button></div>
-    <div class="kv"><span class="k">Anthropic 地址</span><code class="box" id="anthropicBase">—</code><button class="ghost sm" onclick="cp('anthropicBase')">复制</button></div>
-    <div class="kv"><span class="k">默认模型</span>
+    <div class="kv">
+      <span class="k">OpenAI 地址（Base URL）</span>
+      <code class="box" id="openaiBase">—</code>
+      <button class="ghost sm" onclick="cp('openaiBase')">复制</button>
+    </div>
+    <div class="kv">
+      <span class="k">Anthropic 地址（Base URL）</span>
+      <code class="box" id="anthropicBase">—</code>
+      <button class="ghost sm" onclick="cp('anthropicBase')">复制</button>
+    </div>
+    <div class="kv">
+      <span class="k">默认模型</span>
       <select id="defaultModel" style="max-width:220px"></select>
       <span class="muted" id="modelCount"></span>
     </div>
+    <details id="advBox">
+      <summary>地址不对？手动指定</summary>
+      <div class="field" style="margin-top:10px">
+        <label class="f">调用地址前缀（留空=自动检测本机内网 IP）</label>
+        <input id="publicBase" placeholder="例如 http://192.168.1.10:8088">
+      </div>
+      <button class="ghost sm" onclick="saveBase()">保存地址</button>
+      <div class="muted" style="margin-top:8px" id="lanHint"></div>
+    </details>
     <div class="sep"></div>
-    <div class="kv"><span class="k">API Key</span><code class="box" id="apiKey">—</code><button class="ghost sm" onclick="cp('apiKey')">复制</button></div>
+    <div class="kv">
+      <span class="k">API Key</span>
+      <code class="box" id="apiKey">—</code>
+      <button class="ghost sm" onclick="cp('apiKey')">复制</button>
+    </div>
     <div class="row" style="margin-top:6px">
       <button class="ghost sm" onclick="genKey()">重新生成</button>
       <span class="muted" style="align-self:center">重新生成会替换当前 Key，旧 Key 立即失效（只有一个 Key 生效）</span>
@@ -161,18 +185,52 @@ async function api(path, body){
   if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
   return j;
 }
+// 复制：优先 Clipboard API；http 局域网下该 API 不可用，退回 execCommand
+async function cpText(txt){
+  txt = String(txt == null ? '' : txt).trim();
+  if(txt === '—' || txt === '（无）' || !txt) return toast('没有可复制的内容','err');
+  try{
+    if(navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(txt);
+      return toast('已复制','ok');
+    }
+  }catch{ /* 继续走兜底 */ }
+  try{
+    const ta = document.createElement('textarea');
+    ta.value = txt;
+    ta.setAttribute('readonly','');
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+    document.body.appendChild(ta);
+    ta.select(); ta.setSelectionRange(0, txt.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok ? toast('已复制','ok') : toast('复制失败，请长按选择','err');
+  }catch{
+    toast('复制失败，请长按选择','err');
+  }
+}
 function cp(id){
   const el = $(id);
-  const txt = el.textContent.trim();
-  navigator.clipboard.writeText(txt).then(()=>toast('已复制','ok')).catch(()=>toast('复制失败，请手动选择','err'));
+  // data-raw 存未截断的原值（元素可能因换行显示，textContent 本身完整）
+  cpText(el.dataset && el.dataset.raw ? el.dataset.raw : el.textContent);
 }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
 async function load(){
   STATE = await api('/admin/state');
-  $('openaiBase').textContent = STATE.openai_base;
-  $('anthropicBase').textContent = STATE.anthropic_base;
-  $('apiKey').textContent = STATE.api_keys.length ? STATE.api_keys[STATE.api_keys.length - 1].value : '（无）';
+  setBox('openaiBase', STATE.openai_base);
+  setBox('anthropicBase', STATE.anthropic_base);
+  setBox('apiKey', STATE.api_keys.length ? STATE.api_keys[STATE.api_keys.length - 1].value : '（无）');
+
+  // 手动指定地址
+  const pb = $('publicBase');
+  if(pb && document.activeElement !== pb) pb.value = STATE.public_base || '';
+  const hint = $('lanHint');
+  if(hint){
+    const ips = (STATE.lan_ips || []).join('、') || '未检测到';
+    hint.textContent = `本机内网 IP：${ips}　端口：${STATE.port}` +
+      (STATE.public_base ? '（当前使用手动指定地址）' : '（自动检测中）');
+  }
 
   const sel = $('defaultModel');
   sel.innerHTML = Object.keys(STATE.models).map(m =>
@@ -218,12 +276,28 @@ async function load(){
 
   $('keyList').innerHTML = STATE.api_keys.length
     ? STATE.api_keys.map(k =>
-        `<div class="kv"><code class="box">${esc(k.value)}</code>
-         <button class="ghost sm" onclick="navigator.clipboard.writeText('${esc(k.value)}').then(()=>toast('已复制','ok'))">复制</button></div>`).join('')
+        `<div class="kv"><span class="k">当前 Key</span><code class="box" data-raw="${esc(k.value)}">${esc(k.value)}</code>
+         <button class="ghost sm" data-cp="${esc(k.value)}" onclick="cpText(this.dataset.cp)">复制</button></div>`).join('')
       + '<div class="muted">同一时间只有一个 Key 生效。需要更换请点上方「重新生成」。</div>'
     : '<div class="muted">无</div>';
 }
 
+function setBox(id, val){
+  const el = $(id);
+  if(!el) return;
+  const v = (val == null || val === '') ? '—' : String(val);
+  el.textContent = v;
+  el.dataset.raw = v;   // 复制时用未截断的原值
+  el.title = v;
+}
+async function saveBase(){
+  const v = $('publicBase').value.trim();
+  try{
+    const r = await api('/admin/server/base', { public_base: v });
+    toast(v ? '已保存地址' : '已恢复自动检测', 'ok');
+    await load();
+  }catch(e){ toast(e.message,'err'); }
+}
 async function addAccount(){
   const cookie = $('newCookie').value.trim();
   if(!cookie) return toast('请粘贴 Cookie','err');

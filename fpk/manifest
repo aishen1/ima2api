@@ -1,5 +1,5 @@
 appname               = ima2api
-version               = 1.0.2
+version               = 1.0.3
 display_name          = "ima2api"
 desc                  = "把腾讯 IMA (ima.copilot) 的 AI 能力转成本地 OpenAI / Anthropic 兼容 API。支持多账号 Cookie、网页配置、自动续期。"
 platform              = x86
