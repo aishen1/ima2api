@@ -23,13 +23,20 @@ const CONFIG_DIR = process.env.IMA2API_CONFIG_DIR
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 const CONFIG_EXAMPLE = path.join(__dirname, "config.example.json");
 
+// 内嵌网关：unix socket 监听路径（由 cmd/main 传入，如 /vol2/@appcenter/ima2api/app.sock）
+const SOCKET_PATH = (process.env.IMA2API_SOCKET || "").trim();
+// 内嵌网关：对外路径前缀（如 /app/ima2api）。网关会把完整路径透传给我们，需要剥掉。
+const BASE_PATH = (process.env.IMA2API_BASE_PATH || "").trim().replace(/\/+$/, "");
+
 // 页面构建标记：注入到 <head>，用于确认手机/浏览器实际加载的是哪一版页面
-const BUILD_VERSION = "1.0.5";
+const BUILD_VERSION = "1.0.6";
 const ADMIN_HTML = (() => {
   let html;
   try { html = fs.readFileSync(path.join(__dirname, "admin.html"), "utf-8"); }
   catch { return "<h1>admin.html 缺失</h1>"; }
-  const meta = `<meta name="ima2api-build" content="${BUILD_VERSION}">`;
+  // basepath：内嵌时页面在 /app/ima2api 子路径下，前端据此拼请求与判断来源
+  const meta = `<meta name="ima2api-build" content="${BUILD_VERSION}">`
+    + `<meta name="ima2api-basepath" content="${BASE_PATH}">`;
   return html.includes("</head>") ? html.replace("</head>", meta + "</head>") : meta + html;
 })();
 
@@ -1631,7 +1638,14 @@ async function router(req, res) {
   if (req.method === "OPTIONS") { res.writeHead(204); return res.end(); }
 
   const url = req.url;
-  const urlPath = url.split("?")[0];
+  // 内嵌网关会把 /app/ima2api/... 原样转发过来，剥掉前缀后按正常路由处理
+  const stripped = stripBasePath(url.split("?")[0]);
+  const urlPath = stripped;
+  const qs = url.includes("?") ? url.slice(url.indexOf("?")) : "";
+  if (urlPath !== url.split("?")[0]) {
+    req.url = urlPath + qs;
+    req._imaBaseHit = true;
+  }
 
   if (urlPath === "/health") return json(res, 200, { status: "ok" });
 
@@ -1805,6 +1819,14 @@ function activePort() {
   return Number(process.env.IMA2API_PORT) || CONFIG.server?.port || 8081;
 }
 
+// 剥掉网关前缀：/app/ima2api/admin/state → /admin/state
+function stripBasePath(p) {
+  if (!BASE_PATH) return p;
+  if (p === BASE_PATH) return "/";
+  if (p.startsWith(BASE_PATH + "/")) return p.slice(BASE_PATH.length);
+  return p;
+}
+
 // 本机内网 IPv4（缓存）。手机等外部设备访问时不能给 127.0.0.1。
 let _lanIpCache = null;
 function lanIp() {
@@ -1846,17 +1868,15 @@ function lanIpAll() {
   return out;
 }
 
-// 调用地址：优先用户显式配置的 public_base，
-// 否则用请求的 Host；Host 缺失或指向 loopback 时换成本机内网 IP。
+// 调用地址：默认「本机内网 IP + 实际端口」（不看请求 Host）。
+// 原因：内嵌到飞牛 App 里时，请求走的是网关（Host 是飞牛的网页端口），
+// 用它拼出来的地址对调用方毫无意义；而 lanIp + PORT 始终是别的设备能直连的地址。
+// 只有显式配置了 public_base（域名/反代）时才优先使用它。
 function serverBase(req) {
   const override = (CONFIG.server?.public_base || "").trim().replace(/\/+$/, "");
   if (override) return override;
-  const rawHost = ((req && req.headers && req.headers.host) || "").trim().split(":")[0];
-  let host = rawHost;
-  if (!host || /^(127\.|localhost$|::1$|0\.0\.0\.0$)/i.test(host)) {
-    host = lanIp() || host || "127.0.0.1";
-  }
-  return `http://${host}:${activePort()}`;
+  const ip = lanIp() || "127.0.0.1";
+  return `http://${ip}:${activePort()}`;
 }
 
 async function adminApi(req, res, urlPath) {
@@ -2137,6 +2157,36 @@ server.on("error", (e) => {
   }
   process.exit(1);
 });
+
+// 内嵌网关：额外监听一个 unix socket，供飞牛 App 内嵌页面使用。
+// 这条链路完全走本机，不经过公网，也不会被公网入口策略影响。
+let socketServer = null;
+if (SOCKET_PATH) {
+  try {
+    // 清掉上次异常退出留下的残留文件，否则 EADDRINUSE
+    try { if (fs.existsSync(SOCKET_PATH)) fs.unlinkSync(SOCKET_PATH); } catch { }
+    socketServer = http.createServer(router);
+    socketServer.on("error", (e) => {
+      console.error(`内嵌 socket 监听失败（${SOCKET_PATH}）：${e.message}`);
+    });
+    socketServer.listen(SOCKET_PATH, () => {
+      try { fs.chmodSync(SOCKET_PATH, 0o666); } catch { }
+      console.log(`内嵌网关 socket 已就绪: ${SOCKET_PATH}（前缀 ${BASE_PATH || "/"}）`);
+    });
+  } catch (e) {
+    console.error(`内嵌 socket 初始化失败：${e.message}（不影响 TCP 端口使用）`);
+  }
+}
+
+function shutdown() {
+  try { server.close(); } catch { }
+  try { if (socketServer) socketServer.close(); } catch { }
+  try { if (SOCKET_PATH && fs.existsSync(SOCKET_PATH)) fs.unlinkSync(SOCKET_PATH); } catch { }
+  process.exit(0);
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+
 server.listen(PORT, HOST, () => {
   console.log(`ima2api 已启动: http://${HOST}:${PORT}`);
   console.log(`配置页: http://<NAS_IP>:${PORT}/   | 配置文件: ${CONFIG_FILE}`);

@@ -30,6 +30,12 @@ LOG_FILE="${TRIM_PKGVAR}/info.log"
 PID_FILE="${TRIM_PKGVAR}/app.pid"
 PORT="${IMA2API_PORT:-8088}"
 
+# 内嵌网关：unix socket + 路径前缀。飞牛 App 通过 trim_http_cgi 把
+# /app/ima2api/... 转发到这个 socket，全程走本机，不经过公网。
+GATEWAY_PREFIX="/app/${APPNAME}"
+SOCK_FILE="${TRIM_APPDEST}/app.sock"; [ -d "${TRIM_APPDEST}" ] || SOCK_FILE="/vol2/@appcenter/${APPNAME}/app.sock"
+[ -d "$(dirname "${SOCK_FILE}")" ] || SOCK_FILE=""
+
 mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true
 
 log_msg() {
@@ -92,7 +98,10 @@ start_process() {
 
     log_msg "Starting ima2api on port ${PORT} ..."
     cd "${APP_DIR}" || return 1
+    # 残留 socket 会让 listen 报 EADDRINUSE
+    [ -n "${SOCK_FILE}" ] && rm -f "${SOCK_FILE}" 2>/dev/null
     IMA2API_CONFIG_DIR="${CONFIG_DIR}" IMA2API_PORT="${PORT}" \
+        IMA2API_SOCKET="${SOCK_FILE}" IMA2API_BASE_PATH="${GATEWAY_PREFIX}" \
         "${NODE_BIN}" "${APP_DIR}/server.js" >> "${LOG_FILE}" 2>&1 &
     printf "%s" "$!" > "${PID_FILE}"
 

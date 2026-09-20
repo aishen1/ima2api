@@ -180,7 +180,7 @@ function toast(msg, kind){
 }
 async function api(path, body){
   const opt = body ? {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)} : {method:'GET'};
-  const r = await fetch(path, opt);
+  const r = await fetch(apiPath(path), opt);
   const j = await r.json().catch(()=>({}));
   if(!r.ok){
     let msg = j.error || ('HTTP '+r.status);
@@ -306,16 +306,37 @@ async function load(){
 function resolveBase(){
   const norm = s => String(s == null ? '' : s).trim().replace(/\/+$/, '');
   const ok = s => /^https?:\/\/[^\s/]+/i.test(s);
-  const isLoop = s => /^https?:\/\/(127\.|localhost|\[::1\]|0\.0\.0\.0)/i.test(s);
+  // 1) 手动指定优先
   const manual = norm(STATE && STATE.public_base);
   if (ok(manual)) return manual;
+  // 2) 服务端权威值：内网 IP + 实际端口。
+  //    内嵌到飞牛 App 时浏览器地址是网关地址（如 http://NAS:5666/app/ima2api），
+  //    拿它当调用地址是错的，所以服务端值优先。
+  const srv = norm(STATE && (STATE.base_url || STATE.openai_base || STATE.anthropic_base));
+  if (ok(srv)) return srv.replace(/\/v1$/, '');
+  // 3) 兜底：浏览器地址（仅在直接访问端口时有意义）
   try{
     const loc = norm(window.location.protocol + '//' + window.location.host);
-    if (ok(loc) && !isLoop(loc)) return loc;   // 在 NAS 本机打开时是 127.0.0.1，不可给别人用
-  }catch{ /* 忽略，走兜底 */ }
-  const srv = norm(STATE && (STATE.base_url || STATE.openai_base || STATE.anthropic_base));
-  if (ok(srv)) return srv.replace(/\/v1$/, '');   // 剥掉可能重复的 /v1
+    if (ok(loc) && !/^https?:\/\/(127\.|localhost|\[::1\]|0\.0\.0\.0)/i.test(loc)) return loc;
+  }catch{ }
   return '';
+}
+
+// 内嵌网关前缀（如 /app/ima2api）。内嵌时页面在子路径下，
+// 相对请求会解析到 /app/admin/state 而不是 /admin/state，必须拼上前缀。
+const BASE_PATH = (() => {
+  try{
+    const m = document.querySelector('meta[name="ima2api-basepath"]');
+    if(m && m.content) return String(m.content).replace(/\/+$/, '');
+    const p = window.location.pathname || '';
+    const hit = p.match(/^(\/app\/[^/]+)/);
+    if(hit) return hit[1];
+  }catch{ }
+  return '';
+})();
+
+function apiPath(p){
+  return BASE_PATH + p;
 }
 function baseInfo(){
   const b = resolveBase();
