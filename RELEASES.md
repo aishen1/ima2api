@@ -10,6 +10,25 @@ appcenter-cli install-fpk /path/to/ima2api-1.0.x.fpk
 
 ---
 
+## 1.0.7 — 模型列表与 IMA 客户端「内置模型」自动同步
+
+`ima2api-1.0.7.fpk` · SHA256: `bd8dba608cc5e49b10f87d01a5fa3d5a`
+
+**背景**：模型表原先硬编码在 `server.js` 里（6 个旧模型），IMA 官方已调整过模型阵容却无从感知。
+
+**改动**：新增免登录接口 `POST https://ima.qq.com/cgi-bin/model_manage/get_models`（就是 IMA 客户端「内置模型」调的那个），服务启动时自动拉取并**整体替换**模型表 —— 与官方接口**严格一致，不保留任何旧模型**。
+
+- 官方返回 4 个模型，每个带 `sub_model_infos`；**思考模式是子模型，不单独占条目**，用 `-think` / `-reasoning` 后缀调用（如 `glm-5-3-flash-think`）
+- 模型名解析放宽：slug（`glm-5-3-flash`）、原始显示名（`GLM-5.3-Flash`）、裸 `model_type`（`3001`）均可
+- 管理页新增「同步模型」按钮 + 上次同步时间；`POST /admin/models/sync` 可编程触发
+- 上游不可达时自动沿用上次模型表，服务不中断，错误写入 `models_sync_error`
+
+**注意**：`glm-5.2` 系列在官方侧已改名为 **GLM-5.3-Flash**（同一 `model_type` 槽位 3000/3001），升级后请把客户端模型名改为 `glm-5-3-flash` / `glm-5-3-flash-think`。
+
+**验证**：真机跑同步 —— 上游 4 个 → 本地 4 个，旧模型残留 0，`/v1/models` 输出 4 条；模型名解析 14/14 通过；上游不可达时回退正常。
+
+---
+
 ## 1.0.6 — 飞牛 App 内嵌模式 + 调用地址固定输出
 
 `ima2api-1.0.6.fpk` · SHA256: `042cb65a278382e4399734e62cfb5e6f`

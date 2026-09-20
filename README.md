@@ -77,7 +77,7 @@ appcenter-cli install-fpk fpk/ima2api.fpk
 {
   "server": { "port": 8081, "host": "0.0.0.0" },
   "api_keys": ["sk-ima-请自定一个密钥"],
-  "default_model": "hy3-preview",
+  "default_model": "deepseek-v4-flash",
   "accounts": [
     {
       "id": "<自动生成，可留空>",
@@ -87,7 +87,7 @@ appcenter-cli install-fpk fpk/ima2api.fpk
       "enabled": true
     }
   ],
-  "models": { "hy3-preview": { "type": 0, "id": "official_0", "name": "Tencent Hy3 preview" } }
+  "models": { "hy3": { "type": 0, "id": "official_0", "think_type": 2, "think_id": "official_2", "name": "Hy3" } }
 }
 ```
 
@@ -201,18 +201,18 @@ curl http://localhost:8080/v1/models -H "Authorization: Bearer YOUR_KEY"
 curl http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer YOUR_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}]}'
+  -d '{"model":"glm-5-3-flash","messages":[{"role":"user","content":"你好"}]}'
 
 # 流式
 curl http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer YOUR_KEY" \
-  -d '{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}],"stream":true}'
+  -d '{"model":"glm-5-3-flash","messages":[{"role":"user","content":"你好"}],"stream":true}'
 
 # Tool calling
 curl http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer YOUR_KEY" \
   -d '{
-    "model":"glm-5.2",
+    "model":"glm-5-3-flash",
     "messages":[{"role":"user","content":"执行 uname -a"}],
     "tools":[{
       "type":"function",
@@ -225,7 +225,7 @@ curl http://localhost:8080/v1/chat/completions \
 curl http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer YOUR_KEY" \
   -d '{
-    "model":"glm-5.2",
+    "model":"glm-5-3-flash",
     "messages":[
       {"role":"user","content":"执行 uname -a"},
       {"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{\"command\":\"uname -a\"}"}}]},
@@ -240,13 +240,13 @@ curl http://localhost:8080/v1/chat/completions \
 # 流式对话
 curl http://localhost:8080/v1/messages \
   -H "Authorization: Bearer YOUR_KEY" \
-  -d '{"model":"glm-5.2","max_tokens":1024,"messages":[{"role":"user","content":"你好"}],"stream":true}'
+  -d '{"model":"glm-5-3-flash","max_tokens":1024,"messages":[{"role":"user","content":"你好"}],"stream":true}'
 
 # Tool use
 curl http://localhost:8080/v1/messages \
   -H "Authorization: Bearer YOUR_KEY" \
   -d '{
-    "model":"glm-5.2",
+    "model":"glm-5-3-flash",
     "max_tokens":1024,
     "messages":[{"role":"user","content":"执行 pwd"}],
     "tools":[{"name":"Bash","description":"执行命令","input_schema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}]
@@ -284,14 +284,19 @@ curl http://localhost:8080/v1/messages \
 
 ## 可用模型
 
-| 模型 ID | 底座 | 说明 |
-|---------|------|------|
-| `glm-5.2` | GLM-5.2 | 默认 |
-| `glm-5.2-think` | GLM-5.2 | 思考模式 |
-| `deepseek-v4-flash` | DeepSeek V4 | 快速 |
-| `deepseek-v4-flash-think` | DeepSeek V4 | 思考模式 |
-| `hy3-preview` | 混元 Hy3 | 预览 |
-| `hy3-preview-think` | 混元 Hy3 | 思考模式 |
+模型列表**启动时自动从 IMA 官方接口同步**（`POST ima.qq.com/cgi-bin/model_manage/get_models`，免登录），
+与 IMA 客户端「内置模型」完全一致，无需手工维护。当前官方提供 4 个：
+
+| 模型 ID | 底座 | 思考模式 |
+|---------|------|----------|
+| `deepseek-v4-flash` | DeepSeek-V4-Flash | `deepseek-v4-flash-think` |
+| `hy3` | 混元 Hy3 | `hy3-think` |
+| `hy4-preview` | 混元 Hy4 preview | `hy4-preview-think` |
+| `glm-5-3-flash` | GLM-5.3-Flash | `glm-5-3-flash-think` |
+
+思考模式是官方模型下的**子模型**（`sub_model_infos`），不单独列入 `/v1/models`，
+用 `-think` / `-reasoning` 后缀调用；也接受模型显示名（如 `GLM-5.3-Flash`）或裸 `model_type` 数字。
+管理页有「同步模型」按钮可随时手动同步；上游不可用时自动沿用上次的模型表，不影响服务。
 
 ## 认证
 
@@ -306,7 +311,7 @@ curl http://localhost:8080/v1/messages \
 from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8080/v1", api_key="your-key")
 response = client.chat.completions.create(
-    model="glm-5.2",
+    model="glm-5-3-flash",
     messages=[{"role": "user", "content": "你好"}],
     tools=[{"type":"function","function":{"name":"Bash","description":"执行命令","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}}],
     stream=True
@@ -322,7 +327,7 @@ for chunk in response:
 from anthropic import Anthropic
 client = Anthropic(base_url="http://localhost:8080/v1", api_key="your-key")
 with client.messages.stream(
-    model="glm-5.2",
+    model="glm-5-3-flash",
     max_tokens=1024,
     messages=[{"role": "user", "content": "你好"}]
 ) as stream:

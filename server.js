@@ -14,6 +14,8 @@ const os = require("os");
 
 const BASE_HOST = "ima.qq.com";
 const BASE_URL = "https://ima.qq.com";
+// 上游模型列表接口（免登录，客户端「内置模型」下拉就是调它）
+const MODEL_LIST_PATH = "/cgi-bin/model_manage/get_models";
 
 // 配置目录：优先环境变量 IMA2API_CONFIG_DIR（fpk 里指向 TRIM_PKGVAR），
 // 否则退回脚本所在目录（兼容旧用法）。
@@ -520,8 +522,22 @@ function resolveModel(requested) {
   if (!requested) return MODELS[DEFAULT_MODEL];
   if (MODELS[requested]) return MODELS[requested];
   const lower = requested.toLowerCase();
+  // <key>-think / <key>:think / <key>-reasoning → 官方 sub_model 里的思考子模型
+  const m = lower.match(/^(.*?)[-_:]?(think|reasoning|thinking)$/);
+  if (m) {
+    const b = MODELS[m[1]] || MODELS[slugModelKey(m[1])] ||
+      Object.values(MODELS).find(v => v.name && slugModelKey(v.name) === slugModelKey(m[1]));
+    if (b && b.think_type != null) {
+      return { type: b.think_type, id: b.think_id, name: `${b.name} (Think)`, think: true };
+    }
+  }
+  const wanted = slugModelKey(requested);   // GLM-5.3-Flash → glm-5-3-flash
   for (const [k, v] of Object.entries(MODELS)) {
-    if (k.toLowerCase() === lower || String(v.type) === lower) return v;
+    if (k.toLowerCase() === lower || k === wanted) return v;
+    if (String(v.type) === lower) return v;
+    if (v.name && (String(v.name).toLowerCase() === lower || slugModelKey(v.name) === wanted)) return v;
+    if (v.think_type != null && String(v.think_type) === lower)
+      return { type: v.think_type, id: v.think_id, name: `${v.name} (Think)`, think: true };
   }
   return MODELS[DEFAULT_MODEL];
 }
@@ -1680,7 +1696,8 @@ async function router(req, res) {
       openai: ["POST /v1/chat/completions (tools / function calling)", "GET /v1/models"],
       anthropic: ["POST /v1/messages (tools / tool_use)"],
     },
-    models: Object.keys(getModels()),
+    models: Object.entries(getModels()).filter(([, v]) => !v.alias).map(([k]) => k),
+    models_synced_at: CONFIG.models_synced_at || null,
     auth: "Bearer <api_key> or x-api-key header",
   });
 
@@ -1706,7 +1723,9 @@ async function router(req, res) {
   }
 
   if (req.method === "GET" && urlPath === "/v1/models") {
-    const modelList = Object.entries(getModels()).map(([id, info]) => ({
+    // 旧的兼容别名（alias:true）仍可被 resolveModel 解析，但不列出来
+    const listed = Object.entries(getModels()).filter(([, info]) => !info.alias);
+    const modelList = listed.map(([id, info]) => ({
       id, object: "model", created: 1700000000, owned_by: "ima",
       type: "model", display_name: info.name,
       created_at: "2024-01-01T00:00:00Z",
@@ -1889,6 +1908,8 @@ async function adminApi(req, res, urlPath) {
       api_keys: (CONFIG.api_keys || []).map(k => ({ masked: maskKey(k), value: k })),
       models: getModels(),
       default_model: getDefaultModel(),
+      models_synced_at: CONFIG.models_synced_at || null,
+      models_sync_error: CONFIG.models_sync_error || null,
       port: activePort(),
       base_url: serverBase(req),
       openai_base: serverBase(req) + "/v1",
@@ -1916,6 +1937,16 @@ async function adminApi(req, res, urlPath) {
       openai_base: serverBase(req) + "/v1",
       anthropic_base: serverBase(req) + "/v1",
     });
+  }
+
+  // POST /admin/models/sync — 手动触发一次模型同步
+  if (req.method === "POST" && urlPath === "/admin/models/sync") {
+    try {
+      const r = await syncModels();
+      return json(res, 200, { ok: true, ...r });
+    } catch (e) {
+      return json(res, 500, { ok: false, error: e.message });
+    }
   }
 
   // POST /admin/account/add — 新增账号
@@ -2080,6 +2111,125 @@ function httpPostJson(hostname, path, headers, bodyObj, timeout = 20000) {
   });
 }
 
+// ============================================================
+// 12b. 模型列表自动同步（拉 ima 上游 get_models）
+// ============================================================
+// 上游返回结构（实测）：
+//   { code:0, models:[ { model_name:"Hy4 preview", model_type:1001,
+//                        sub_model_infos:{ "0":{model_type:1001}, "1":{model_type:1002} } } ] }
+// 其中 sub_model_infos["0"] 是主模型、"1" 是 think 变体 → 拆成两个 key。
+
+function slugModelKey(name) {
+  const s = String(name || "").trim().toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return s || "model";
+}
+
+async function fetchUpstreamModels(timeout = 15000) {
+  const { status, data } = await httpPostJson(
+    BASE_HOST,
+    MODEL_LIST_PATH,
+    {
+      "from_browser_ima": "1",
+      "referer": BASE_URL,
+      "origin": BASE_URL,
+      "User-Agent": "okhttp/4.12.0",
+      "Content-Type": "application/json; charset=utf-8",
+      "Accept-Encoding": "gzip",
+    },
+    {},
+    timeout
+  );
+  if (status !== 200) throw new Error(`HTTP ${status}`);
+  const obj = typeof data === "string" ? JSON.parse(data) : data;
+  if (!obj || obj.code !== 0) {
+    throw new Error(`code ${obj && obj.code}: ${(obj && obj.msg) || "unknown"}`);
+  }
+  const list = Array.isArray(obj.models) ? obj.models : [];
+  if (!list.length) throw new Error("上游返回空模型列表");
+  return list;
+}
+
+// 上游 models[] → { key: {type,id,name} }，含 think 变体
+function modelsFromUpstream(list) {
+  const out = {};
+  for (const m of list) {
+    const name = m.model_name || m.short_model_name || "";
+    if (!name) continue;
+    const key = slugModelKey(name);
+    const subs = m.sub_model_infos || {};
+    const prim = subs["0"] || m;
+    const primType = Number(prim.model_type != null ? prim.model_type : m.model_type);
+    const entry = {
+      type: primType,
+      id: prim.model_id || m.model_id || `official_${primType}`,
+      name,
+      is_new: !!m.is_new,
+      is_default: !!m.is_default,
+    };
+    // 思考是「子模型」（官方 sub_model_infos 的 "1"），不是独立模型：
+    // 不单独列出，仅记录 type/id，供 -think 后缀按需选用。
+    const think = subs["1"];
+    if (think && Number(think.model_type) !== primType) {
+      entry.think_type = Number(think.model_type);
+      entry.think_id = think.model_id || `official_${entry.think_type}`;
+    }
+    out[key] = entry;
+  }
+  return out;
+}
+
+// 拉上游 → 整体替换 CONFIG.models（与官方接口完全一致，不保留旧模型）
+async function syncModels({ persist = true, quiet = false } = {}) {
+  let list;
+  try {
+    list = await fetchUpstreamModels();
+  } catch (e) {
+    CONFIG.models_sync_error = `${new Date().toISOString()}: ${e.message}`;
+    if (persist) { try { saveConfig(); } catch { } }
+    if (!quiet) console.error(`[MODELS] 同步失败，沿用上次模型表：${e.message}`);
+    throw e;
+  }
+  const fresh = modelsFromUpstream(list);
+  if (!Object.keys(fresh).length) {
+    CONFIG.models_sync_error = `${new Date().toISOString()}: 上游模型列表为空`;
+    if (persist) { try { saveConfig(); } catch { } }
+    if (!quiet) console.error("[MODELS] 上游模型列表为空，沿用上次模型表");
+    throw new Error("上游模型列表为空");
+  }
+  const old = CONFIG.models || {};
+  const removed = Object.keys(old).filter(k => !fresh[k]);
+  CONFIG.models = fresh; // 整体替换：旧模型一律不保留
+  // default_model：用户已选的若仍存在就保留，否则用官方 is_default，再否则第一个
+  if (!fresh[CONFIG.default_model]) {
+    const def = list.find(m => m.is_default);
+    const defKey = def ? slugModelKey(def.model_name) : null;
+    CONFIG.default_model = (defKey && fresh[defKey]) ? defKey : Object.keys(fresh)[0];
+  }
+  const added = Object.keys(fresh).filter(k => !old[k]);
+  CONFIG.models_synced_at = new Date().toISOString();
+  CONFIG.models_sync_error = null;
+  if (persist) saveConfig();
+  if (!quiet) {
+    console.log(`[MODELS] 同步完成：上游 ${list.length} 个 / 本地 ${Object.keys(fresh).length} 个${added.length ? ` / 新增 ${added.join(", ")}` : ""}${removed.length ? ` / 移除 ${removed.join(", ")}` : ""}`);
+  }
+  return {
+    ok: true,
+    upstream: list.map(m => ({ name: m.model_name, type: m.model_type })),
+    added, removed,
+    count: Object.keys(fresh).length,
+    synced_at: CONFIG.models_synced_at,
+  };
+}
+
+// 定时同步（默认 6 小时）；改模型不频繁，没必要太勤
+function startModelSync(intervalMs = 6 * 60 * 60 * 1000) {
+  setInterval(() => {
+    syncModels({ quiet: true }).catch(() => { });
+  }, intervalMs).unref();
+}
+
 // 调 ima.qq.com/auth_login/refresh 换新 token（实测服务端不校验 registration_id）
 async function refreshAccount(a) {
   if (!a.refresh_token) return { ok: false, error: "缺少 refresh_token" };
@@ -2195,4 +2345,9 @@ server.listen(PORT, HOST, () => {
     console.log(`没有可用账号，请打开 http://<NAS_IP>:${PORT}/ 添加 Cookie`);
   }
   startRefresher();
+  // 启动即同步一次模型列表（失败不影响服务，用本地已有 models）
+  syncModels({ quiet: true })
+    .then(r => console.log(`[MODELS] 启动同步：${r.count} 个（新增 ${r.added.length}）`))
+    .catch(e => console.error(`[MODELS] 启动同步失败，沿用本地模型表：${e.message}`));
+  startModelSync();
 });

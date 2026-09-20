@@ -88,6 +88,8 @@
       <span class="k">默认模型</span>
       <select id="defaultModel" style="max-width:220px"></select>
       <span class="muted" id="modelCount"></span>
+      <button class="btn ghost" id="syncModels" style="margin-left:8px">同步模型</button>
+      <span class="muted" id="syncInfo"></span>
     </div>
     <details id="advBox">
       <summary>地址不对？手动指定</summary>
@@ -223,6 +225,25 @@ function cp(id){
 }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
+// 手动触发模型同步
+async function doSyncModels(){
+  const btn = $('syncModels');
+  if (!btn) return;
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = '同步中…';
+  try{
+    const r = await api('/admin/models/sync', {});
+    const add = (r.added && r.added.length) ? `，新增 ${r.added.join(', ')}` : '';
+    const del = (r.removed && r.removed.length) ? `，移除 ${r.removed.join(', ')}` : '';
+    toast(`同步成功：上游 ${r.upstream.length} 个模型${add}${del}`, 'ok');
+    await load();
+  }catch(e){
+    toast(`同步失败：${e.message}`, 'err');
+  }finally{
+    btn.disabled = false; btn.textContent = old;
+  }
+}
+
 async function load(){
   STATE = await api('/admin/state');
 
@@ -255,6 +276,20 @@ async function load(){
   sel.innerHTML = Object.keys(STATE.models).map(m =>
     `<option value="${esc(m)}" ${m===STATE.default_model?'selected':''}>${esc(m)}</option>`).join('');
   $('modelCount').textContent = Object.keys(STATE.models).length + ' 个模型';
+  // 模型同步状态
+  const si = $('syncInfo');
+  if (si) {
+    if (STATE.models_sync_error) {
+      si.innerHTML = `<span style="color:#d33">同步失败：${esc(String(STATE.models_sync_error).slice(0,80))}</span>`;
+    } else if (STATE.models_synced_at) {
+      const t = new Date(STATE.models_synced_at);
+      const mins = Math.floor((Date.now() - t.getTime())/60000);
+      const ago = mins < 1 ? '刚刚' : mins < 60 ? `${mins} 分钟前` : mins < 1440 ? `${Math.floor(mins/60)} 小时前` : `${Math.floor(mins/1440)} 天前`;
+      si.textContent = `· 已同步 ${ago}`;
+    } else {
+      si.textContent = '· 未同步';
+    }
+  }
 
   const list = $('acctList');
   const accts = STATE.accounts || [];
@@ -427,6 +462,7 @@ $('defaultModel').addEventListener('change', async e=>{
   try{ await api('/admin/config',{default_model:e.target.value}); toast('已切换默认模型','ok'); }
   catch(err){ toast(err.message,'err'); }
 });
+$('syncModels').addEventListener('click', doSyncModels);
 
 load().catch(e=>{
   // 状态接口即使不可用，地址也能从浏览器自身算出——先给用户一份可用的调用地址
