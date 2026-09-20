@@ -68,7 +68,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>ima2api 配置</h1>
+  <h1>ima2api 配置 <span class="muted" id="buildTag" style="font-size:12px"></span></h1>
   <div class="sub">添加 IMA Cookie 账号（可多个），复制本地调用地址与 Key</div>
 
   <!-- 调用信息 -->
@@ -218,9 +218,19 @@ function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;',
 
 async function load(){
   STATE = await api('/admin/state');
-  setBox('openaiBase', STATE.openai_base);
-  setBox('anthropicBase', STATE.anthropic_base);
+
+  // 地址一律由「浏览器当前访问地址」推导，保证手机/电脑都拿到自己真能连通的完整地址
+  const bi = baseInfo();
+  setBox('openaiBase', bi.base ? bi.base + '/v1' : '');
+  setBox('anthropicBase', bi.base ? bi.base + '/v1' : '');
   setBox('apiKey', STATE.api_keys.length ? STATE.api_keys[STATE.api_keys.length - 1].value : '（无）');
+
+  // 页面构建标记：与服务端注入的 meta 对照，用于确认加载的是哪一版
+  const bt = $('buildTag');
+  if(bt){
+    const m = document.querySelector('meta[name="ima2api-build"]');
+    bt.textContent = m ? ('v' + m.getAttribute('content')) : '';
+  }
 
   // 手动指定地址
   const pb = $('publicBase');
@@ -228,8 +238,10 @@ async function load(){
   const hint = $('lanHint');
   if(hint){
     const ips = (STATE.lan_ips || []).join('、') || '未检测到';
-    hint.textContent = `本机内网 IP：${ips}　端口：${STATE.port}` +
-      (STATE.public_base ? '（当前使用手动指定地址）' : '（自动检测中）');
+    hint.textContent = `当前地址来源：${bi.src}　→　${bi.base || '（未获取到）'}` +
+      `\n本机内网 IP：${ips}　端口：${STATE.port}` +
+      (STATE.public_base ? '（已手动指定，如需恢复自动请清空上面的输入框再保存）' : '（自动检测中）');
+    hint.style.whiteSpace = 'pre-wrap';
   }
 
   const sel = $('defaultModel');
@@ -280,6 +292,29 @@ async function load(){
          <button class="ghost sm" data-cp="${esc(k.value)}" onclick="cpText(this.dataset.cp)">复制</button></div>`).join('')
       + '<div class="muted">同一时间只有一个 Key 生效。需要更换请点上方「重新生成」。</div>'
     : '<div class="muted">无</div>';
+}
+
+// 解析调用地址前缀：优先级 = 手动指定 > 浏览器当前访问地址（非回环） > 服务端返回值
+// 手机/电脑用哪个地址打开的页面，就用哪个地址作调用地址，必然连通且端口完整
+function resolveBase(){
+  const norm = s => String(s == null ? '' : s).trim().replace(/\/+$/, '');
+  const ok = s => /^https?:\/\/[^\s/]+/i.test(s);
+  const isLoop = s => /^https?:\/\/(127\.|localhost|\[::1\]|0\.0\.0\.0)/i.test(s);
+  const manual = norm(STATE && STATE.public_base);
+  if (ok(manual)) return manual;
+  try{
+    const loc = norm(window.location.protocol + '//' + window.location.host);
+    if (ok(loc) && !isLoop(loc)) return loc;   // 在 NAS 本机打开时是 127.0.0.1，不可给别人用
+  }catch{ /* 忽略，走兜底 */ }
+  const srv = norm(STATE && (STATE.base_url || STATE.openai_base || STATE.anthropic_base));
+  if (ok(srv)) return srv.replace(/\/v1$/, '');   // 剥掉可能重复的 /v1
+  return '';
+}
+function baseInfo(){
+  const b = resolveBase();
+  const manual = String((STATE && STATE.public_base) || '').trim();
+  const src = /^https?:\/\//i.test(manual) ? '手动指定' : (b ? '自动（按本机访问地址）' : '未获取到');
+  return { base: b, src };
 }
 
 function setBox(id, val){

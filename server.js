@@ -22,9 +22,15 @@ const CONFIG_DIR = process.env.IMA2API_CONFIG_DIR
   : __dirname;
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 const CONFIG_EXAMPLE = path.join(__dirname, "config.example.json");
+
+// 页面构建标记：注入到 <head>，用于确认手机/浏览器实际加载的是哪一版页面
+const BUILD_VERSION = "1.0.4";
 const ADMIN_HTML = (() => {
-  try { return fs.readFileSync(path.join(__dirname, "admin.html"), "utf-8"); }
+  let html;
+  try { html = fs.readFileSync(path.join(__dirname, "admin.html"), "utf-8"); }
   catch { return "<h1>admin.html 缺失</h1>"; }
+  const meta = `<meta name="ima2api-build" content="${BUILD_VERSION}">`;
+  return html.includes("</head>") ? html.replace("</head>", meta + "</head>") : meta + html;
 })();
 
 function defaultConfig() {
@@ -532,6 +538,8 @@ function cors(res) {
 
 function json(res, code, obj) {
   cors(res);
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+  res.setHeader("Pragma", "no-cache");
   res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(obj));
   if (code >= 400) {
@@ -1636,7 +1644,12 @@ async function router(req, res) {
   }
 
   if (urlPath === "/" || urlPath === "/index.html") {
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      "Pragma": "no-cache",
+      "Expires": "0",
+    });
     return res.end(ADMIN_HTML);
   }
 
