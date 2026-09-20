@@ -24,7 +24,7 @@ const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 const CONFIG_EXAMPLE = path.join(__dirname, "config.example.json");
 
 // 页面构建标记：注入到 <head>，用于确认手机/浏览器实际加载的是哪一版页面
-const BUILD_VERSION = "1.0.4";
+const BUILD_VERSION = "1.0.5";
 const ADMIN_HTML = (() => {
   let html;
   try { html = fs.readFileSync(path.join(__dirname, "admin.html"), "utf-8"); }
@@ -1638,7 +1638,13 @@ async function router(req, res) {
   // ---- 本地管理 API（仅允许来自本机/内网访问，公网来源拒绝） ----
   if (urlPath === "/admin" || urlPath.startsWith("/admin/")) {
     if (!isLocalRequest(req)) {
-      return json(res, 403, { error: "管理接口仅允许内网访问" });
+      const ci = clientInfo(req);
+      return json(res, 403, {
+        error: "管理接口仅允许内网访问",
+        peer: ci.peer || "(未知)",
+        forwarded_for: ci.xff || "(无)",
+        hint: "若你是从内网/App 访问却被拒，请把上面两行信息发给开发者",
+      });
     }
     return await adminApi(req, res, urlPath);
   }
@@ -1737,13 +1743,49 @@ async function router(req, res) {
 // ============================================================
 // 11. 管理 API（本机/内网）
 // ============================================================
+// 规范化对端地址：去掉 IPv4-mapped IPv6 前缀（::ffff:192.168.1.5）
+function normalizeIp(s) {
+  s = String(s || "").trim();
+  if (!s) return "";
+  const m = s.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+  if (m) return m[1];
+  const h = s.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+  if (h) {
+    const n = (((parseInt(h[1], 16) << 16) >>> 0) | parseInt(h[2], 16)) >>> 0;
+    return [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join(".");
+  }
+  return s;
+}
+
+function isLoopbackIp(ip) {
+  return ip === "::1" || /^127\./.test(ip);
+}
+
+function isPrivateIp(ip) {
+  if (!ip) return false;
+  return /^10\./.test(ip)
+    || /^192\.168\./.test(ip)
+    || /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
+    || /^169\.254\./.test(ip)
+    || /^fe80:/i.test(ip)
+    || /^(fc|fd)[0-9a-f]{2}:/i.test(ip);
+}
+
+// 对端信息，用于 403 时把服务端实际看到的东西写进错误里（便于自查，不用翻日志）
+function clientInfo(req) {
+  const peer = normalizeIp((req.socket && (req.socket.remoteAddress || "")) || "");
+  const xff = String(req.headers["x-forwarded-for"] || "").trim();
+  return { peer, xff };
+}
+
+// 管理接口来源判定：只看 TCP 对端地址（socket），不信任 X-Forwarded-For。
+// 原因：fnOS App 从外网打开本页时，请求由本机网关/中转到 8088，
+// 此时 TCP 对端是 127.0.0.1（本机），而 XFF 里写的是手机的公网出口 IP。
+// 若按 XFF 判定，用户自己会被拦掉；而真正的公网直连，TCP 对端本身就是公网地址，仍会被拒。
 function isLocalRequest(req) {
-  const ip = (req.socket && (req.socket.remoteAddress || "")) || "";
-  const xff = (req.headers["x-forwarded-for"] || "").split(",")[0].trim();
-  const clientIp = xff || ip;
-  // loopback / 私有网段 / link-local
-  return /^(::1|::ffff:127\.|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|fe80:|fc|fd)/i.test(clientIp)
-    || clientIp === "" || clientIp === "::ffff:127.0.0.1";
+  const peer = normalizeIp((req.socket && (req.socket.remoteAddress || "")) || "");
+  if (!peer) return true; // 拿不到对端（unix socket 等）按本机处理
+  return isLoopbackIp(peer) || isPrivateIp(peer);
 }
 
 function readBody(req) {

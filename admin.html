@@ -182,7 +182,14 @@ async function api(path, body){
   const opt = body ? {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)} : {method:'GET'};
   const r = await fetch(path, opt);
   const j = await r.json().catch(()=>({}));
-  if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
+  if(!r.ok){
+    let msg = j.error || ('HTTP '+r.status);
+    const diag = [];
+    if(j.peer) diag.push('服务端看到的来源 '+j.peer);
+    if(j.forwarded_for && j.forwarded_for !== '(无)') diag.push('转发链 '+j.forwarded_for);
+    if(diag.length) msg += '（' + diag.join('，') + '）';
+    throw new Error(msg);
+  }
   return j;
 }
 // 复制：优先 Clipboard API；http 局域网下该 API 不可用，退回 execCommand
@@ -400,8 +407,15 @@ $('defaultModel').addEventListener('change', async e=>{
   catch(err){ toast(err.message,'err'); }
 });
 
-load().catch(e=>{ document.querySelector('.wrap').insertAdjacentHTML('afterbegin',
-  '<div class="card" style="border-color:#5a1e24">加载失败：'+esc(e.message)+'<br><span class="muted">请确认从内网访问本页，且服务已启动。</span></div>'); });
+load().catch(e=>{
+  // 状态接口即使不可用，地址也能从浏览器自身算出——先给用户一份可用的调用地址
+  try{
+    const bi = baseInfo();
+    if(bi.base){ setBox('openaiBase', bi.base + '/v1'); setBox('anthropicBase', bi.base + '/v1'); }
+  }catch{ }
+  document.querySelector('.wrap').insertAdjacentHTML('afterbegin',
+    '<div class="card" style="border-color:#5a1e24">加载失败：'+esc(e.message)+
+    '<br><span class="muted">账号与 Key 需要管理接口才能读取。请确认服务已启动；若你从公网访问，请改用内网地址打开本页。</span></div>'); });
 </script>
 </body>
 </html>
