@@ -31,7 +31,7 @@ const SOCKET_PATH = (process.env.IMA2API_SOCKET || "").trim();
 const BASE_PATH = (process.env.IMA2API_BASE_PATH || "").trim().replace(/\/+$/, "");
 
 // 页面构建标记：注入到 <head>，用于确认手机/浏览器实际加载的是哪一版页面
-const BUILD_VERSION = "1.0.6";
+const BUILD_VERSION = "1.0.8";
 const ADMIN_HTML = (() => {
   let html;
   try { html = fs.readFileSync(path.join(__dirname, "admin.html"), "utf-8"); }
@@ -1996,6 +1996,95 @@ async function adminApi(req, res, urlPath) {
     if (CONFIG.accounts.length === before) return json(res, 404, { ok: false, error: "账号不存在" });
     saveConfig();
     return json(res, 200, { ok: true });
+  }
+
+  // POST /admin/qr/login — 扫码登录：用微信 code 换 ima 凭证并落库
+  //   body: { code, name?, account_type? }
+  //   code → ima auth_login/login → { token, refreshToken, userId, ... } → 组 x-ima-cookie → 落库
+  if (req.method === "POST" && urlPath === "/admin/qr/login") {
+    const code = String(body.code || "").trim();
+    if (!code) return json(res, 400, { ok: false, error: "缺少 code" });
+    const accountType = Number(body.account_type) || 2; // 默认微信登录
+
+    let data;
+    try {
+      const r = await httpPostJson(
+        BASE_HOST,
+        "/auth_login/login",
+        {
+          "from_browser_ima": "1",
+          "referer": BASE_URL,
+          "origin": BASE_URL,
+          "User-Agent": "okhttp/4.12.0",
+          "Content-Type": "application/json; charset=utf-8",
+          "Accept-Encoding": "gzip",
+        },
+        {
+          client_info: { platform: Number(body.platform) || 1 },
+          account_type: accountType,
+          code,
+        }
+      );
+      data = r.data;
+    } catch (e) {
+      return json(res, 502, { ok: false, error: `换取凭证失败：${e.message}` });
+    }
+
+    if (!data || data.code !== 0) {
+      const msg = data && (data.msg || data.message)
+        ? `code ${data.code}: ${data.msg || data.message}`
+        : JSON.stringify(data).slice(0, 200);
+      return json(res, 400, { ok: false, error: `ima 拒绝该 code：${msg}` });
+    }
+
+    const token = data.token || "";
+    const refresh = data.refreshToken || data.refresh_token || "";
+    const uid = data.userId || data.user_id || "";
+    if (!token || !uid) {
+      return json(res, 502, { ok: false, error: "ima 未返回 token/userId，无法组 Cookie" });
+    }
+
+    // 组装 x-ima-cookie（与网页版 buildCookie() 同构）
+    const cookie = [
+      `IMA-UID=${uid}`,
+      `IMA-TOKEN=${token}`,
+      `IMA-REFRESH-TOKEN=${refresh}`,
+      `UID-TYPE=${data.idType != null ? data.idType : 0}`,
+      `TOKEN-TYPE=${data.tokenType != null ? data.tokenType : 0}`,
+      "PLATFORM=H5",
+    ].join("; ");
+
+    const account = {
+      id: crypto.randomUUID(),
+      name: String(body.name || "").trim() || `账号 ${(CONFIG.accounts || []).length + 1}`,
+      cookie,
+      refresh_token: refresh,
+      enabled: true,
+      created_at: new Date().toISOString(),
+      created_via: "qr",
+    };
+    CONFIG.accounts = CONFIG.accounts || [];
+    CONFIG.accounts.push(account);
+
+    // 落库前先验一次：确认这枚 token 真能拿到 session
+    let verified = false;
+    try {
+      verified = !!(await imaInitSession("ping", account));
+      if (!verified) account.last_error = "登录后校验未通过（拿不到 session）";
+    } catch (e) {
+      account.last_error = `登录后校验失败：${e.message}`;
+    }
+
+    saveConfig();
+    return json(res, 200, {
+      ok: true,
+      id: account.id,
+      name: account.name,
+      uid_masked: String(uid).replace(/^(.{3}).*(.{2})$/, "$1***$2"),
+      has_refresh_token: !!refresh,
+      verified,
+      warning: verified ? null : (account.last_error || null),
+    });
   }
 
   // POST /admin/account/test — 测试某个账号是否可用

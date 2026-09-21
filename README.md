@@ -95,10 +95,31 @@ appcenter-cli install-fpk fpk/ima2api.fpk
 
 ### 获取 Cookie
 
+**方式一：网页扫码登录（推荐，1.0.8+）**
+
+打开配置页 → 「扫码登录」→ 用微信扫一扫，登录成功后账号**自动加入列表**，无需抓包、无需粘贴。
+
+原理（`POST /admin/qr/login`）：
+
+1. 配置页用 iframe 内嵌 ima 官方登录页 `https://ima.qq.com/login#/login-qr-only`
+2. 用微信扫码，ima 登录页通过 `postMessage` 把微信 `code` 发给宿主页面
+   （事件名 `loginWxCodeReady`，页面只接受来自 `https` + `ima.qq.com` 的消息）
+3. 宿主页面把 `code` 交给后端 → 后端调 `ima.qq.com/auth_login/login` 换取
+   `token` / `refreshToken` / `userId`
+4. 服务端组装成 `x-ima-cookie` 落库，并**立刻发一次真实请求校验**，确认这枚凭证可用
+
+> 为什么要绕这一圈：微信开放平台的 `redirect_uri` 白名单只放行 `https://ima.qq.com/login`，
+> `code` 不可能直接回调到 NAS 地址。ima 的登录页本身实现了把 `code` 用 `postMessage`
+> 交给宿主的能力，我们直接复用它，所以**全程不需要浏览器插件、不需要抓包**。
+
+**方式二：手工粘贴 Cookie**
+
 1. 手机安装 IMA App，QQ/微信登录
 2. 配置 HTTPS 代理（mitmproxy / Charles / Fiddler）
 3. 发送任意消息，复制请求头里的 `x-ima-cookie` **完整值**（其中已含 `IMA-REFRESH-TOKEN`）
 4. 粘贴到配置页即可 —— 无需再单独抓 `https://ima.qq.com/auth_login/refresh`
+
+两种方式获得的凭证等价，都一样能自动续期。
 
 ## 多账号与网页配置
 
@@ -106,6 +127,7 @@ appcenter-cli install-fpk fpk/ima2api.fpk
 
 | 功能 | 说明 |
 |------|------|
+| **扫码登录** | 内嵌微信二维码，扫码即自动添加账号（1.0.8+） |
 | 添加账号 | 粘贴 Cookie 即可，可加任意多个 |
 | 有效性显示 | **有效 / 已失效 / 异常 / 缺凭据 / 已停用 / 未验证** 六态徽标 |
 | 剩余有效期 | 由「最近续期时间 + 接口返回的有效秒数」推算，临近过期变橙色警示 |
