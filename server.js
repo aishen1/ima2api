@@ -31,7 +31,7 @@ const SOCKET_PATH = (process.env.IMA2API_SOCKET || "").trim();
 const BASE_PATH = (process.env.IMA2API_BASE_PATH || "").trim().replace(/\/+$/, "");
 
 // 页面构建标记：注入到 <head>，用于确认手机/浏览器实际加载的是哪一版页面
-const BUILD_VERSION = "1.0.8";
+const BUILD_VERSION = "1.0.9";
 const ADMIN_HTML = (() => {
   let html;
   try { html = fs.readFileSync(path.join(__dirname, "admin.html"), "utf-8"); }
@@ -1998,11 +1998,51 @@ async function adminApi(req, res, urlPath) {
     return json(res, 200, { ok: true });
   }
 
-  // POST /admin/qr/login — 扫码登录：用微信 code 换 ima 凭证并落库
-  //   body: { code, name?, account_type? }
-  //   code → ima auth_login/login → { token, refreshToken, userId, ... } → 组 x-ima-cookie → 落库
+  // ============ 扫码登录（服务端纯 HTTP 长轮询）============
+  // POST /admin/qr/create — 新建一个扫码会话，返回 { session, qr_data_url }
+  //
+  // 为什么不内嵌 ima 登录页 + postMessage（1.0.8 的做法，已证实不可用）：
+  //   ima 的 universal 登录页把微信 code 转发给它自己的 window.parent 时，
+  //   targetOrigin 走 Bs()，而 Bs() 在普通浏览器里恒等于常量 Nm="https://ima.qq.com"
+  //   （G2 白名单里根本没有 ima.qq.com，所以必然落到兜底常量）。
+  //   我们的页面源是 http://NAS:8088，与 "https://ima.qq.com" 不匹配，
+  //   浏览器会直接丢弃这条消息 —— 无论用哪个路由都收不到 code。
+  //   targetOrigin 白名单 XS 也只有 ima 自家域名，没有放行外部宿主的可能。
+  //
+  //   所以改为把整条微信扫码链路搬到服务端：自己拉 qrconnect 页取 uuid，
+  //   自己长轮询，拿到 wx_code 后直接换 token。全程无跨源，也不需要浏览器参与。
+  if (req.method === "POST" && urlPath === "/admin/qr/create") {
+    try {
+      const s = await qrCreateSession();
+      return json(res, 200, { ok: true, ...s });
+    } catch (e) {
+      return json(res, 502, { ok: false, error: `创建扫码会话失败：${e.message}` });
+    }
+  }
+
+  // GET /admin/qr/poll?session=xxx — 查询扫码状态
+  //   { state: 'waiting'|'scanned'|'confirmed'|'expired'|'canceled' }
+  if (req.method === "GET" && urlPath === "/admin/qr/poll") {
+    // adminApi 只收到 urlPath（已去 query），所以从 req.url 自己解析
+    const qs = String(req.url || "").split("?")[1] || "";
+    const sess = new URLSearchParams(qs).get("session") || "";
+    if (!sess) return json(res, 400, { ok: false, error: "缺少 session" });
+    const r = await qrPollSession(sess);
+    return json(res, 200, r);
+  }
+
+  // POST /admin/qr/login — 用微信 code 换 ima 凭证并落库
+  //   body: { code, name?, account_type? }  或  { session, name? }
+  //   传 session 时服务端自己取已到手的 code（推荐，前端不必碰 code）
   if (req.method === "POST" && urlPath === "/admin/qr/login") {
-    const code = String(body.code || "").trim();
+    let code = String(body.code || "").trim();
+    const sessId = String(body.session || "").trim();
+    if (!code && sessId) {
+      const s = qrSessions.get(sessId);
+      if (!s) return json(res, 400, { ok: false, error: "扫码会话不存在或已过期，请重新扫码" });
+      if (!s.code) return json(res, 400, { ok: false, error: "尚未拿到微信 code，请先完成扫码" });
+      code = s.code;
+    }
     if (!code) return json(res, 400, { ok: false, error: "缺少 code" });
     const accountType = Number(body.account_type) || 2; // 默认微信登录
 
@@ -2198,6 +2238,155 @@ function httpPostJson(hostname, path, headers, bodyObj, timeout = 20000) {
     req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
     req.write(payload); req.end();
   });
+}
+
+// ============================================================
+// 11d. 扫码登录：服务端纯 HTTP 长轮询
+// ============================================================
+// 微信 qrconnect 的完整链路（全部在服务端完成，不经过浏览器）：
+//   1. GET  open.weixin.qq.com/connect/qrconnect?...  ← 页面里带 uuid
+//   2. GET  open.weixin.qq.com/connect/qrcode/<uuid>  ← JPEG 二维码
+//   3. GET  long.open.weixin.qq.com/connect/l/qrconnect?uuid=<uuid>   ← 阻塞长轮询
+//          响应是 JS：window.wx_errcode=NNN;window.wx_code='...';
+//            408 = 未扫码（继续轮询）
+//            404 = 已扫码待确认（继续轮询）
+//            405 = 已确认，wx_code 就是微信 code  ← 目标
+//            403 = 用户取消
+//            402 = 二维码过期
+//   4. 拿到 code → POST ima /auth_login/login 换 token
+
+const WX_APPID = "wx0d63f5de059f1d52";           // ima 网页版扫码用
+const WX_REDIRECT = "https://ima.qq.com/login";  // 微信白名单内唯一允许的值
+
+// session → { uuid, code, state, createdAt, lastPollAt, error }
+const qrSessions = new Map();
+const QR_SESSION_TTL = 10 * 60 * 1000;  // 10 分钟
+const QR_POLL_TIMEOUT = 25 * 1000;      // 单次长轮询上限
+
+function qrSweep() {
+  const now = Date.now();
+  for (const [k, v] of qrSessions) {
+    if (now - v.createdAt > QR_SESSION_TTL) qrSessions.delete(k);
+  }
+}
+
+// 底层 GET，返回原始字节（二维码是 JPEG，不能当文本读）
+function httpGetRaw(hostname, path, timeout = QR_POLL_TIMEOUT, extraHeaders = {}) {
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname, port: 443, path, method: "GET",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "*/*",
+        "Accept-Encoding": "identity",   // 避免 gzip，二维码要原样字节
+        ...extraHeaders,
+      },
+      timeout,
+    }, (res) => {
+      const chunks = [];
+      res.on("data", c => chunks.push(c));
+      res.on("end", () => resolve({ status: res.statusCode, buf: Buffer.concat(chunks) }));
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
+    req.end();
+  });
+}
+
+async function qrCreateSession() {
+  qrSweep();
+  const qs = new URLSearchParams({
+    appid: WX_APPID,
+    scope: "snsapi_login",
+    redirect_uri: WX_REDIRECT,
+    state: "ima2api",
+    login_type: "jssdk",
+    self_redirect: "true",
+  });
+  const { status, buf } = await httpGetRaw(
+    "open.weixin.qq.com", `/connect/qrconnect?${qs.toString()}`, 20000
+  );
+  if (status !== 200) throw new Error(`qrconnect HTTP ${status}`);
+  const html = buf.toString("utf-8");
+
+  // uuid 从"一定不能删掉"的 fordevtool 行取，最稳
+  let m = html.match(/\/connect\/l\/qrconnect\?uuid=([0-9A-Za-z_\-]+)/);
+  if (!m) m = html.match(/connect\/qrcode\/([0-9A-Za-z_\-]{10,})/);
+  if (!m) throw new Error("未能从 qrconnect 页面解析出 uuid");
+  const uuid = m[1];
+
+  const id = crypto.randomUUID();
+  qrSessions.set(id, {
+    uuid, code: "", state: "waiting",
+    createdAt: Date.now(), lastPollAt: 0, error: "",
+  });
+
+  // 二维码直接内联成 data URL，前端 <img src> 即可，不需要额外接口也不用落盘
+  const { status: qs2, buf: img } = await httpGetRaw(
+    "open.weixin.qq.com", `/connect/qrcode/${uuid}`, 20000
+  );
+  if (qs2 !== 200 || !img.length) throw new Error(`二维码图片 HTTP ${qs2}`);
+  const mime = img[0] === 0xFF && img[1] === 0xD8 ? "image/jpeg" : "image/png";
+
+  return {
+    session: id,
+    expires_in: Math.floor(QR_SESSION_TTL / 1000),
+    qr_data_url: `data:${mime};base64,${img.toString("base64")}`,
+  };
+}
+
+// 单次长轮询。微信侧会把请求挂住，直到状态变化或超时（返回 408）。
+async function qrPollSession(id) {
+  qrSweep();
+  const s = qrSessions.get(id);
+  if (!s) return { ok: false, state: "expired", error: "会话不存在或已过期" };
+  if (s.state === "confirmed") return { ok: true, state: "confirmed", has_code: !!s.code };
+  if (s.state === "canceled" || s.state === "expired") return { ok: true, state: s.state };
+
+  const host = "long.open.weixin.qq.com";
+  const path = `/connect/l/qrconnect?uuid=${encodeURIComponent(s.uuid)}`;
+  let txt = "";
+  try {
+    const { status, buf } = await httpGetRaw(host, path, QR_POLL_TIMEOUT);
+    if (status !== 200) {
+      // 长轮询被网络层中断不致命，让前端下次再来
+      return { ok: true, state: "waiting", note: `HTTP ${status}` };
+    }
+    txt = buf.toString("utf-8");
+  } catch (e) {
+    // 超时也视为"还没扫码"
+    return { ok: true, state: "waiting", note: e.message };
+  }
+
+  const mErr = txt.match(/wx_errcode\s*=\s*(\d+)/);
+  const mCode = txt.match(/wx_code\s*=\s*['"]([^'"]*)['"]/);
+  const errcode = mErr ? Number(mErr[1]) : NaN;
+  const wxCode = mCode ? mCode[1] : "";
+  s.lastPollAt = Date.now();
+
+  switch (errcode) {
+    case 405:
+      if (!wxCode) {
+        s.error = "微信返回 405 但没带 code";
+        return { ok: false, state: "error", error: s.error };
+      }
+      s.code = wxCode;
+      s.state = "confirmed";
+      return { ok: true, state: "confirmed", has_code: true };
+    case 404:
+      s.state = "scanned";
+      return { ok: true, state: "scanned" };   // 已扫码，手机待确认
+    case 403:
+      s.state = "canceled";
+      return { ok: true, state: "canceled" };
+    case 402:
+      s.state = "expired";
+      return { ok: true, state: "expired" };
+    case 408:
+    default:
+      return { ok: true, state: "waiting" };
+  }
 }
 
 // ============================================================

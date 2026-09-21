@@ -112,26 +112,26 @@
     </div>
   </div>
 
-  <!-- 扫码登录（内嵌 ima 官方登录页） -->
+  <!-- 扫码登录（服务端长轮询，不依赖 iframe / 跨源消息） -->
   <div class="card">
     <h2>扫码登录 <span class="muted" id="qrState"></span></h2>
     <div class="row" style="margin-bottom:10px">
-      <button onclick="qrStart()" style="flex:0 0 auto">显示二维码</button>
+      <button onclick="qrStart()" style="flex:0 0 auto">获取二维码</button>
       <button class="ghost sm" onclick="qrReload()" style="flex:0 0 auto">刷新二维码</button>
       <button class="ghost sm" onclick="qrStop()" style="flex:0 0 auto">收起</button>
     </div>
     <div id="qrWrap" style="display:none">
-      <iframe id="qrFrame" referrerpolicy="no-referrer-when-downgrade"
-        sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
-        style="width:100%;height:420px;border:1px solid #2a3142;border-radius:10px;background:#fff"></iframe>
+      <div id="qrImgBox" style="text-align:center;padding:14px;background:#fff;border-radius:10px">
+        <img id="qrImg" alt="微信扫码登录二维码"
+             style="width:240px;height:240px;display:block;margin:0 auto">
+      </div>
       <div class="muted" style="margin-top:8px" id="qrHint">
-        请用微信扫一扫登录。扫码成功后账号会自动加入列表，无需手动粘贴 Cookie。
+        用微信「扫一扫」扫描上方二维码，手机上确认后账号会自动加入列表，无需手动粘贴 Cookie。
       </div>
     </div>
     <div class="muted" style="margin-top:10px">
-      若二维码无法显示（内嵌被拦截），可
-      <a href="https://ima.qq.com/login" target="_blank" rel="noopener" style="color:#6ea8fe">在新窗口打开登录页</a>
-      ，登录后仍可用下方手动粘贴 Cookie。
+      二维码由本机服务端直接向微信获取，不依赖浏览器跨域，也不需要公网。
+      扫不了时仍可用下方手动粘贴 Cookie。
     </div>
   </div>
 
@@ -166,11 +166,6 @@
     <div id="acctList"></div>
     <div class="muted" id="acctEmpty" style="display:none">还没有账号，请在上方添加。</div>
   </div>
-
-  <details class="card">
-    <summary>高级：当前调用的 Key</summary>
-    <div id="keyList" style="margin-top:14px"></div>
-  </details>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -178,23 +173,15 @@
 const $ = id => document.getElementById(id);
 let STATE = null;
 
-// 账号有效性状态 → 徽标文案/样式/建议
+// 账号有效性状态 → 徽标文案/样式
 const STATE_LABEL = {
-  ok:       { text:'有效',   cls:'on',   hint:'' },
-  invalid:  { text:'已失效', cls:'err',  hint:'Cookie 已过期，请点「更新 Cookie」重新粘贴，或点「立即续期」' },
-  error:    { text:'异常',   cls:'warn', hint:'最近请求出错（可能是网络或上游抖动），可点「测试」复查' },
-  nocookie: { text:'缺凭据', cls:'err',  hint:'没有 Cookie，请更新 Cookie' },
-  disabled: { text:'已停用', cls:'off',  hint:'已停用，不参与调用；点「启用」恢复' },
-  unknown:  { text:'未验证', cls:'off',  hint:'尚未检测，点「测试」验证有效性' },
+  ok:       { text:'有效',   cls:'on'   },
+  invalid:  { text:'已失效', cls:'err'  },
+  error:    { text:'异常',   cls:'warn' },
+  nocookie: { text:'缺凭据', cls:'err'  },
+  disabled: { text:'已停用', cls:'off'  },
+  unknown:  { text:'未验证', cls:'off'  },
 };
-
-function fmtTime(iso){
-  if(!iso) return '';
-  const d = new Date(iso);
-  if(isNaN(d)) return String(iso);
-  const p = n => String(n).padStart(2,'0');
-  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
 
 function toast(msg, kind){
   const t = $('toast');
@@ -320,29 +307,11 @@ async function load(){
   $('acctSummary').textContent = accts.length ? `（共 ${accts.length} 个，可用 ${STATE.active_accounts} 个）` : '';
   list.innerHTML = accts.map(a => {
     const st = STATE_LABEL[a.state] || STATE_LABEL.unknown;
-    const pills = [];
-    pills.push(`<span class="pill ${st.cls}">${st.text}</span>`);
-    pills.push(a.has_refresh_token ? '<span class="pill on">可自动续期</span>' : '<span class="pill off">无续期票据</span>');
-    // 剩余有效期
-    let expire = '';
-    if(a.remain_seconds != null){
-      const hrs = Math.floor(a.remain_seconds/3600);
-      const mins = Math.max(0, Math.floor((a.remain_seconds%3600)/60));
-      const soon = a.remain_seconds < 900;
-      expire = `<span class="pill ${soon?'warn':'off'}">剩余 ${hrs}h${mins}m</span>`;
-    }
-    const err = a.last_error ? `<div class="meta" style="color:var(--err);margin-top:4px">最近错误：${esc(a.last_error)}${a.last_error_kind==='auth'?'（凭据失效，需重新登录）':''}</div>` : '';
-    const hint = st.hint ? `<div class="meta" style="margin-top:4px">${st.hint}</div>` : '';
+    const pill = `<span class="pill ${st.cls}">${st.text}</span>`;
     return `<div class="acct">
-      <div class="top"><span class="name">${esc(a.name)}</span>${pills.join('')}${expire}</div>
-      <div class="meta">Cookie：${esc(a.cookie_masked)}</div>
-      <div class="meta">成功 ${a.ok_count||0} 次 · 失败 ${a.fail_count||0} 次${a.last_ok?' · 最近成功 '+esc(fmtTime(a.last_ok)):''}${a.last_refresh?' · 最近续期 '+esc(fmtTime(a.last_refresh)):''}${a.last_check?' · 最近检测 '+esc(fmtTime(a.last_check)):''}</div>
-      ${expire && a.expire_at ? `<div class="meta">预计失效：${esc(fmtTime(a.expire_at))}</div>` : ''}
-      ${hint}
-      ${err}
+      <div class="top"><span class="name">${esc(a.name)}</span>${pill}</div>
       <div class="acts">
         <button class="ghost sm" onclick="testAcct('${a.id}')">测试</button>
-        ${a.has_refresh_token?`<button class="ghost sm" onclick="refreshAcct('${a.id}')">立即续期</button>`:''}
         <button class="ghost sm" onclick="toggleAcct('${a.id}',${!a.enabled})">${a.enabled?'停用':'启用'}</button>
         <button class="ghost sm" onclick="renameAcct('${a.id}','${esc(a.name)}')">改名</button>
         <button class="ghost sm" onclick="updateCookie('${a.id}')">更新 Cookie</button>
@@ -350,13 +319,6 @@ async function load(){
       </div>
     </div>`;
   }).join('');
-
-  $('keyList').innerHTML = STATE.api_keys.length
-    ? STATE.api_keys.map(k =>
-        `<div class="kv"><span class="k">当前 Key</span><code class="box" data-raw="${esc(k.value)}">${esc(k.value)}</code>
-         <button class="ghost sm" data-cp="${esc(k.value)}" onclick="cpText(this.dataset.cp)">复制</button></div>`).join('')
-      + '<div class="muted">同一时间只有一个 Key 生效。需要更换请点上方「重新生成」。</div>'
-    : '<div class="muted">无</div>';
 }
 
 // 解析调用地址前缀：优先级 = 手动指定 > 浏览器当前访问地址（非回环） > 服务端返回值
@@ -419,12 +381,15 @@ async function saveBase(){
     await load();
   }catch(e){ toast(e.message,'err'); }
 }
-// ============ 扫码登录（方案 A：内嵌 ima 官方登录页，监听 postMessage 抓 code）============
-// 聊天记录里的坑：
-//  - ima 登录页只放行 redirect_uri=https://ima.qq.com/login（微信白名单），所以 code 回不到我们域
-//  - 但登录页会用 postMessage 把 code 发给宿主，事件名 loginWxCodeReady，data.code 就是微信 code
-//  - 事件来源必须是 ima.qq.com；origin 校验不能省，否则任意页面都能伪造 code
-let QR_BUSY = false;
+// ============ 扫码登录（服务端长轮询）============
+// 早先尝试过内嵌 ima 官方登录页 + 监听 postMessage（1.0.8），已证实行不通：
+//   ima 登录页把微信 code 转发给宿主时，targetOrigin 取常量 "https://ima.qq.com"，
+//   我们页面源是 http://NAS:8088，浏览器直接丢弃该消息，永远收不到 code。
+// 现在整条链路都在服务端完成：后端取 uuid、画二维码、长轮询微信，
+// 前端只需要「拿二维码 → 轮询状态 → 拿到 code 就换账号」，完全不跨源。
+let QR_SESSION = null;   // 当前扫码会话 id
+let QR_TIMER = null;     // 轮询定时器
+let QR_BUSY = false;     // 防止重复提交换取
 
 function qrSetState(text, cls){
   const el = $('qrState');
@@ -433,71 +398,92 @@ function qrSetState(text, cls){
   el.style.color = cls === 'err' ? '#ff6b6b' : cls === 'ok' ? '#4ade80' : '';
 }
 
+function qrStopTimer(){
+  if(QR_TIMER){ clearTimeout(QR_TIMER); QR_TIMER = null; }
+}
+
 function qrStart(){
   const wrap = $('qrWrap');
   if(wrap) wrap.style.display = '';
   qrLoad();
 }
 
-function qrReload(){ qrLoad(); }
-
 function qrStop(){
+  qrStopTimer();
   const wrap = $('qrWrap');
   if(wrap) wrap.style.display = 'none';
-  const f = $('qrFrame');
-  if(f) f.src = 'about:blank';
+  const img = $('qrImg');
+  if(img) img.removeAttribute('src');
+  QR_SESSION = null;
   qrSetState('');
 }
 
-function qrLoad(){
-  const f = $('qrFrame');
-  if(!f) return;
-  // 固定走纯扫码路由，避免用户误点其它登录方式跳出内嵌
-  f.src = 'https://ima.qq.com/login#/login-qr-only?ts=' + Date.now();
-  qrSetState('等待扫码…');
+function qrReload(){ qrLoad(); }
+
+async function qrLoad(){
+  qrStopTimer();
   QR_BUSY = false;
+  QR_SESSION = null;
+  const img = $('qrImg');
+  if(img) img.removeAttribute('src');
+  qrSetState('正在获取二维码…');
+
+  try{
+    const r = await api('/admin/qr/create', {});
+    if(!r || !r.qr_data_url) throw new Error('服务端未返回二维码');
+    QR_SESSION = r.session;
+    if(img) img.src = r.qr_data_url;
+    qrSetState('请用微信扫一扫…');
+    qrPoll();
+  }catch(e){
+    qrSetState('获取二维码失败：' + (e && e.message ? e.message : e), 'err');
+  }
 }
 
-async function onQrMessage(ev){
-  // 只认 ima 官方来源：必须 https + 精确域名
-  // 只校验 hostname 不够——http://ima.qq.com 会被中间人替换掉 code
-  let u = null;
-  try { u = new URL(ev.origin); } catch { return; }
-  if(u.protocol !== 'https:' || u.hostname !== 'ima.qq.com') return;
+// 递归长轮询：每次请求服务端都会去微信那边挂一会儿
+async function qrPoll(){
+  if(!QR_SESSION) return;
+  try{
+    const s = await api('/admin/qr/poll?session=' + encodeURIComponent(QR_SESSION));
+    if(!QR_SESSION) return;   // 期间被收起/刷新了
 
-  const d = ev.data;
-  if(!d || typeof d !== 'object') return;
+    switch(s.state){
+      case 'confirmed':
+        qrSetState('已确认，正在换取登录凭证…');
+        await qrExchange();
+        return;
+      case 'scanned':
+        qrSetState('已扫码，请在手机上确认…');
+        break;
+      case 'canceled':
+        qrSetState('已取消，请点「刷新二维码」重试', 'err');
+        return;
+      case 'expired':
+        qrSetState('二维码已过期，请点「刷新二维码」', 'err');
+        return;
+      case 'error':
+        qrSetState('微信返回异常：' + (s.error || '未知'), 'err');
+        return;
+      default:
+        qrSetState('请用微信扫一扫…');
+    }
+  }catch(e){
+    // 单次轮询失败不必打扰用户，下一轮继续
+    if(!QR_SESSION) return;
+  }
+  QR_TIMER = setTimeout(qrPoll, 1200);
+}
 
-  if(d.eventName === 'loginPanelBooting' || d.eventName === 'loginPanelInitializing'){
-    qrSetState('正在加载登录页…');
-    return;
-  }
-  if(d.eventName === 'loginPanelReady'){
-    qrSetState('请用微信扫码…');
-    return;
-  }
-  if(d.eventName === 'loginPanelError'){
-    qrSetState('登录页加载失败，请点「刷新二维码」，或改用下方手动粘贴 Cookie', 'err');
-    return;
-  }
-  if(d.eventName !== 'loginWxCodeReady') return;
-
-  const code = d.data && d.data.code;
-  if(!code){
-    qrSetState('已扫码但未拿到 code，请重试', 'err');
-    return;
-  }
+async function qrExchange(){
   if(QR_BUSY) return;
   QR_BUSY = true;
-
-  qrSetState('已扫码，正在换取登录凭证…');
   try{
     const r = await api('/admin/qr/login', {
-      code,
+      session: QR_SESSION,
       name: ($('newName') ? $('newName').value.trim() : ''),
     });
     if(r && r.verified){
-      qrSetState('登录成功：' + (r.name || '') , 'ok');
+      qrSetState('登录成功：' + (r.name || ''), 'ok');
       toast('扫码登录成功，账号已加入列表', 'ok');
     }else{
       qrSetState('凭证已保存，但校验未通过：' + (r && r.warning ? r.warning : '请点「测试」复查'), 'err');
@@ -510,7 +496,6 @@ async function onQrMessage(ev){
     qrSetState('换取凭证失败：' + (e && e.message ? e.message : e), 'err');
   }
 }
-window.addEventListener('message', onQrMessage, false);
 
 // ============ 账号操作 ============
 async function addAccount(){
@@ -558,12 +543,6 @@ async function testAll(){
     $('checkHint').textContent = '检测失败：' + e.message;
     toast(e.message,'err');
   }
-}
-async function refreshAcct(id){
-  toast('续期中…');
-  try{ const r = await api('/admin/account/refresh',{id});
-    toast(r.ok?('续期成功'+(r.token_valid_time?'（有效期 '+r.token_valid_time+'s）':'')):('续期失败：'+r.error), r.ok?'ok':'err'); await load();
-  }catch(e){ toast(e.message,'err'); }
 }
 async function genKey(){
   if(!confirm('重新生成会替换当前 Key，使用旧 Key 的客户端将立即失效。\n\n确认继续？')) return;

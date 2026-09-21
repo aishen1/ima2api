@@ -95,22 +95,35 @@ appcenter-cli install-fpk fpk/ima2api.fpk
 
 ### 获取 Cookie
 
-**方式一：网页扫码登录（推荐，1.0.8+）**
+**方式一：网页扫码登录（推荐，1.0.9+）**
 
-打开配置页 → 「扫码登录」→ 用微信扫一扫，登录成功后账号**自动加入列表**，无需抓包、无需粘贴。
+打开配置页 → 「扫码登录」→ 「获取二维码」→ 用微信扫一扫，手机确认后账号**自动加入列表**，无需抓包、无需粘贴。
 
-原理（`POST /admin/qr/login`）：
+原理（`/admin/qr/create` + `/admin/qr/poll` + `/admin/qr/login`）：
 
-1. 配置页用 iframe 内嵌 ima 官方登录页 `https://ima.qq.com/login#/login-qr-only`
-2. 用微信扫码，ima 登录页通过 `postMessage` 把微信 `code` 发给宿主页面
-   （事件名 `loginWxCodeReady`，页面只接受来自 `https` + `ima.qq.com` 的消息）
-3. 宿主页面把 `code` 交给后端 → 后端调 `ima.qq.com/auth_login/login` 换取
-   `token` / `refreshToken` / `userId`
-4. 服务端组装成 `x-ima-cookie` 落库，并**立刻发一次真实请求校验**，确认这枚凭证可用
+1. 服务端直接向微信拉 `open.weixin.qq.com/connect/qrconnect`，取出本次登录的 `uuid`
+2. 取 `connect/qrcode/<uuid>` 拿到二维码图片，以 data URL 内联返回给页面
+3. 页面轮询 `/admin/qr/poll`，服务端长轮询微信（`long.open.weixin.qq.com/connect/l/qrconnect`），
+   解析 `wx_errcode`：`408` 未扫码 / `404` 已扫码待确认 / `405` 已确认（带 `wx_code`）
+4. 拿到 `wx_code` 后调 `ima.qq.com/auth_login/login` 换 `token` / `refreshToken` / `userId`
+5. 组装成 `x-ima-cookie` 落库，并**立刻发一次真实请求校验**，确认这枚凭证可用
 
-> 为什么要绕这一圈：微信开放平台的 `redirect_uri` 白名单只放行 `https://ima.qq.com/login`，
-> `code` 不可能直接回调到 NAS 地址。ima 的登录页本身实现了把 `code` 用 `postMessage`
-> 交给宿主的能力，我们直接复用它，所以**全程不需要浏览器插件、不需要抓包**。
+**全部在服务端完成，不依赖浏览器跨域，也不需要公网。**
+
+> **为什么不用内嵌 ima 登录页 + `postMessage`（1.0.8 的做法，已废弃）**
+>
+> 1.0.8 曾内嵌 `https://ima.qq.com/login` 并监听 `loginWxCodeReady`，实测**永远收不到 code**。
+> 反编译 ima 登录 bundle 后确认有两个独立障碍，且都无解：
+>
+> 1. **路由选错会静默失联**：`#/login-qr-only` 那条路由根本不发 `loginWxCodeReady` ——
+>    它自己调 `verifyWxCode`，把 code 塞进 ima 自己的登录弹窗，对宿主页面完全静默。
+>    只有 `#/universal-login-qr-only` 会经 `#/qr-code-scanned` 中转页把 code 转发出来。
+> 2. **即使换对路由也收不到**：中转页转发时 `targetOrigin` 取 `Bs()`，而 `Bs()` 在普通浏览器里
+>    恒等于常量 `"https://ima.qq.com"`（其白名单 `G2` 里没有 `ima.qq.com`，必然落到兜底常量）。
+>    我们页面源是 `http://NAS:<port>`，永远匹配不上 → **浏览器直接丢弃这条消息**。
+>    ima 自己的 `targetOrigin` 白名单 `XS` 也只含 ima 自家域名，没有放行外部宿主的可能。
+>
+> 所以改把整条链路搬到服务端：自己取 uuid、自己长轮询、自己换 token，绕开跨源限制。
 
 **方式二：手工粘贴 Cookie**
 
@@ -127,16 +140,18 @@ appcenter-cli install-fpk fpk/ima2api.fpk
 
 | 功能 | 说明 |
 |------|------|
-| **扫码登录** | 内嵌微信二维码，扫码即自动添加账号（1.0.8+） |
+| **扫码登录** | 服务端直连微信拉二维码，微信扫一扫、手机确认即自动添加账号（1.0.9+） |
 | 添加账号 | 粘贴 Cookie 即可，可加任意多个 |
 | 有效性显示 | **有效 / 已失效 / 异常 / 缺凭据 / 已停用 / 未验证** 六态徽标 |
-| 剩余有效期 | 由「最近续期时间 + 接口返回的有效秒数」推算，临近过期变橙色警示 |
+| 账号列表 | 只显示**账号名 + 有效性**；Cookie、有效期、调用次数等细节不再展示（1.0.9+） |
 | 检测全部账号 | 一次并发探测所有启用账号，真实请求验证 Cookie |
-| 立即续期 | 用 `refresh_token` 换新 token，无需重启服务 |
-| 启停 / 改名 / 删除 | 停用的账号不参与调用 |
+| 启停 / 改名 / 更新 Cookie / 删除 | 停用的账号不参与调用 |
 | 调用信息 | 直接显示完整的 OpenAI / Anthropic 地址（含内网 IP 与端口）与 API Key，可一键复制 |
 | 自定义调用地址 | 地址不对（多网卡 / 反向代理 / 域名）时，可手动指定前缀，留空即自动检测 |
 | 重新生成 Key | **替换**当前 Key（只保留一个），旧 Key 立即失效 |
+
+> 续期是**后台自动**的（每 2 分钟检查一次，token 临近过期就自动换新），
+> 所以页面上不再暴露「剩余有效期」「立即续期」这类需要人工干预的信息。
 
 ### 调用地址是怎么来的
 

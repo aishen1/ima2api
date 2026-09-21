@@ -1,9 +1,20 @@
 // 前端回归：状态接口正常 / 失败两种情况下，地址与诊断显示
-const { JSDOM } = require("/tmp/v/node_modules/jsdom");
 const fs = require("fs");
 
-const HTML = fs.readFileSync("/vol2/@apphome/hermes-studio/hermes-home/workspace/ima2api-repo/admin.html", "utf-8")
-  .replace("</head>", '<meta name="ima2api-build" content="1.0.5"></head>');
+// jsdom 可选：缺失时跳过（不让整个测试集挂掉）
+let JSDOM;
+try {
+  ({ JSDOM } = require("jsdom"));
+} catch {
+  console.log("跳过 admin-ui：未安装 jsdom（npm install jsdom --no-save）");
+  process.exit(0);
+}
+
+const path = require("path");
+const ROOT = path.resolve(__dirname, "..");
+const HTML = fs.readFileSync(path.join(ROOT, "admin.html"), "utf-8")
+  .replace(/<meta name="ima2api-build"[^>]*>/, "")
+  .replace("</head>", '<meta name="ima2api-build" content="1.0.9"></head>');
 
 const STATE_OK = {
   ok: true,
@@ -65,7 +76,7 @@ const chk = (name, cond, extra = "") => {
   chk("Anthropic 同样完整", r.anthropic === "http://192.168.9.102:8088/v1");
   chk("Key 完整 47 字符", r.apiKey && r.apiKey.length === 47);
   chk("复制用原始值完整", r.openaiRaw === "http://192.168.9.102:8088/v1");
-  chk("构建标记显示 v1.0.5", r.build === "v1.0.5");
+  chk("构建标记显示 v1.0.9", r.build === "v1.0.9");
   chk("无错误框", !r.hasError);
 
   console.log("\n=== 场景2：状态接口 403（你遇到的这一屏）===");
